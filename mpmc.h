@@ -17,19 +17,19 @@ public:
     }
 
     // non-copyable and non-movable
-    MPMCQueue(const MPMCQueue &) = delete;
-    MPMCQueue &operator=(const MPMCQueue &) = delete;
+    MPMCQueue(const MPMCQueue&) = delete;
+    MPMCQueue& operator=(const MPMCQueue&) = delete;
 
-    void push(T &&v) noexcept {
+    void push(T&& v) noexcept {
     }
 
-    bool try_push(T &&v) noexcept {
+    bool try_push(T&& v) noexcept {
         auto success = false; 
-        auto ptr = tail_.load(C) 
+        auto ptr = tail_.load(C_idx) 
 
         while (!success) {
-            auto &node = nodes_[ptr.idx]
-            auto const enq_idx = node.enq_idx.fetch_add(1, A)
+            auto& node = nodes_[ptr.idx]
+            const auto enq_idx = node.enq_idx.fetch_add(1, A)
             if (enq_idx < blocksize_) {
                 // there is room for us, try pushing to slot
                 success = push_to_slot(std::forward<T>(v), node.slots[enq_idx], ptr);
@@ -40,20 +40,67 @@ public:
         }
     }
 
-    void pop(T &v) noexcept {
+    void pop(T& v) noexcept {
     }
 
-    bool try_pop(T &v) noexcept {
+    bool try_pop(T& v) noexcept {
     }
 
 private
     template <typename U>
-    bool push_to_slot(U &&v, Slot& slot, TaggedPtr ptr) noexcept {
-        auto &node = nodes_[ptr.idx]
+    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
+        auto& node = nodes_[ptr.idx]
         if (node.state == ptr.tag) {
             // everything looks good, attempt to write
             slot.item = std::forward<U>(v);
-            auto const prev_state = slot.state.exchange(node.state + 1, R);
+            const auto prev_state = slot.state.exchange(node.state + 1, R);
+            if (prev_state == node.state) 
+                return true // success!
+
+            // consumer ABA occurred, recover item and close slot 
+            v = std::move(slot.item);
+            slot.state.store(node.state + 2, R);
+        } else {
+            // producer ABA occurred, close slot
+            slot.state.exchange(node.state + 2, R);
+        }
+
+        return false
+    }
+
+    template <typename U>
+    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
+        auto& node = nodes_[ptr.idx]
+        if (node.state == ptr.tag) {
+            // everything looks good, attempt to write
+            slot.item = std::forward<U>(v);
+            const auto prev_state = slot.state.exchange(node.state + 2, R);
+            if (prev_state == node.state)
+                return true // success!
+
+            // consumer ABA occurred, recover item and increment reference count 
+            v = std::move(slot.item);
+            ++ref.cnt
+        } else {
+            // producer ABA occurred, invalidate slot
+            const auto prev_state = slot.state.exchange(node.state + 1, R);
+            if (prev_state == node.state)
+                return false
+ 
+            // consumer ABA occurred, close slot and increment reference count
+            slot.state.store(node.state + 2, X)
+            ++ref.cnt
+        }
+
+        return false
+    }
+
+    bool pop_from_slot(const T& obj, Slot& slot, TaggedPtr ptr) noexcept {
+        auto& node = nodes_[ptr.idx]
+        if (node.state == ptr.tag) {
+            // everything looks good, attempt to read
+            slot.item = std::forward<U>(v);
+            const auto prev_state = slot.state.exchange(node.state + 1, R);
             if (prev_state == node.state) 
                 return true // success!
 
@@ -69,8 +116,8 @@ private
     }
 
     void release_ptr(uint32_t ptr_idx, int decrement=1) {
-        auto &node = nodes_[ptr_idx]
-        auto const cnt = node.ref_cnt.fetch_sub(decrement, DEFERRED_RELEASE ? R : X) 
+        auto& node = nodes_[ptr_idx]
+        const auto cnt = node.ref_cnt.fetch_sub(decrement, DEFERRED_RELEASE ? R : X) 
         if (cnt == decrement) {
             if (DEFERRED_RELEASE == false) {
                 // wait for all slots to be closed
@@ -84,9 +131,9 @@ private
         }
     }
 
-    bool advance_ptr(std::atomic<TaggedPtr> &ptr, TaggedPtr &curr_val) {
-        auto const new_val = nodes_[curr_val.idx].next.load(C_atm)
-        TaggedPtr null_ptr = {kNull, curr_val.tag}
+    bool advance_ptr(std::atomic<TaggedPtr>& ptr, TaggedPtr& curr_val) {
+        const auto new_val = nodes_[curr_val.idx].next.load(C_atm)
+        const TaggedPtr null_ptr = {kNull, curr_val.tag}
         if (new_val != null_ptr) {
             if (ptr.compare_exchange_strong(curr_val, new_val, R, C_idx)) {
                 release_ptr(curr_val.idx)
@@ -98,13 +145,13 @@ private
         return false
     }
 
-    bool get_next_tail(TaggedPtr &curr_tail) noexcept {
+    bool get_next_tail(TaggedPtr& curr_tail) noexcept {
         // attempt to advance the tail first
         if (advance_ptr(tail_, curr_tail))
             return true
 
         // no more nodes in the queue, attempt to allocate
-        auto const alloc_idx = freelist_.try_pop(curr_tail);
+        const auto alloc_idx = freelist_.try_pop(curr_tail);
         if (curr_tail.idx == kNull) {
             curr_tail = tail_.load(C_idx)
             return true
@@ -113,7 +160,7 @@ private
             return false // freelist is empty
 
         // allocation succeeded, prepare new node to be added
-        auto &alloc_node = nodes_[alloc_idx]
+        auto& alloc_node = nodes_[alloc_idx]
         alloc_node.reset()
 
         // append new node to end of the queue 
@@ -121,9 +168,9 @@ private
         auto curr_lead = lead_.load(C_idx)
         bool done = false
         while (!done) {
-            auto &next_ptr = nodes_[curr_lead.idx].next
+            auto& next_ptr = nodes_[curr_lead.idx].next
             auto curr_next = next_ptr.load(C_atm) 
-            TaggedPtr null_ptr = {kNull, curr_lead.tag}
+            const TaggedPtr null_ptr = {kNull, curr_lead.tag}
             if (curr_next == null_ptr) {
                 if (next_ptr.compare_exchange_strong(curr_next, alloc_ptr, R, C_atm)) {
                     curr_next = alloc_ptr
@@ -168,7 +215,7 @@ private:
         // head_, tail_, lead_ = 3 pointers = 3 references
         constexpr size_t num_references() const noexcept {DEFERRED_RELEASE ? blocksize_ + 3 : 3} 
         
-        Slot *slots;
+        Slot* slots;
         alignas(kCacheLineSize) state = 0;
         
         // atomics
@@ -189,10 +236,10 @@ private:
             } while (!head.compare_exchange_weak(curr_head, new_head, R, X));
         }
 
-        uint32_t try_pop(TaggedPtr &q_tail) {
+        uint32_t try_pop(const TaggedPtr& q_tail) {
             auto curr_head = head.load(C_idx);
-            auto const &q_tail_node = nodes_[q_tail.idx] 
-            TaggedPtr null_ptr = {kNull, q_tail.tag};
+            const auto& q_tail_node = nodes_[q_tail.idx] 
+            const TaggedPtr null_ptr = {kNull, q_tail.tag};
             TaggedPtr new_head;
  
             // check for empty list on each loop iteration
@@ -213,7 +260,7 @@ private:
     };
 
 private:
-    size_t blocksize_; 
+    const size_t blocksize_; 
     alignas(kCacheLineSize) std::atomic<TaggedPtr> head_;
     alignas(kCacheLineSize) std::atomic<TaggedPtr> tail_;
     alignas(kCacheLineSize) std::atomic<TaggedPtr> lead_;
