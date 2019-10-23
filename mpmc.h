@@ -10,15 +10,15 @@ namespace goldslope {
 
 template <typename T, bool DEFERRED_RELEASE=false> class MPMCQueue {
 public:
-    explicit MPMCQueue(const size_t capacity) {
+    explicit MPMCQueue(size_t const capacity) {
     }
 
     ~MPMCQueue() noexcept {
     }
 
     // non-copyable and non-movable
-    MPMCQueue(const MPMCQueue&) = delete;
-    MPMCQueue& operator=(const MPMCQueue&) = delete;
+    MPMCQueue(MPMCQueue const&) = delete;
+    MPMCQueue& operator=(MPMCQueue const&) = delete;
 
     void push(T&& v) noexcept {
     }
@@ -29,7 +29,7 @@ public:
 
         while (!success) {
             auto& node = nodes_[ptr.idx]
-            const auto enq_idx = node.enq_idx.fetch_add(1, A)
+            auto const enq_idx = node.enq_idx.fetch_add(1, A)
             if (enq_idx < blocksize_) {
                 // there is room for us, try pushing to slot
                 success = push_to_slot(std::forward<T>(v), node.slots[enq_idx], ptr);
@@ -53,7 +53,7 @@ private
         if (node.state == ptr.tag) {
             // everything looks good, attempt to write
             slot.item = std::forward<U>(v);
-            const auto prev_state = slot.state.exchange(node.state + 1, R);
+            auto const prev_state = slot.state.exchange(node.state + 1, R);
             if (prev_state == node.state) 
                 return true // success!
 
@@ -74,7 +74,7 @@ private
         if (node.state == ptr.tag) {
             // everything looks good, attempt to write
             slot.item = std::forward<U>(v);
-            const auto prev_state = slot.state.exchange(node.state + 2, R);
+            auto const prev_state = slot.state.exchange(node.state + 2, R);
             if (prev_state == node.state)
                 return true // success!
 
@@ -83,7 +83,7 @@ private
             ++ref.cnt
         } else {
             // producer ABA occurred, invalidate slot
-            const auto prev_state = slot.state.exchange(node.state + 1, R);
+            auto const prev_state = slot.state.exchange(node.state + 1, R);
             if (prev_state == node.state)
                 return false
  
@@ -95,12 +95,12 @@ private
         return false
     }
 
-    bool pop_from_slot(const T& obj, Slot& slot, TaggedPtr ptr) noexcept {
+    bool pop_from_slot(T const& obj, Slot& slot, TaggedPtr ptr) noexcept {
         auto& node = nodes_[ptr.idx]
         if (node.state == ptr.tag) {
             // everything looks good, attempt to read
             slot.item = std::forward<U>(v);
-            const auto prev_state = slot.state.exchange(node.state + 1, R);
+            auto const prev_state = slot.state.exchange(node.state + 1, R);
             if (prev_state == node.state) 
                 return true // success!
 
@@ -115,9 +115,9 @@ private
         return false
     }
 
-    void release_ptr(uint32_t ptr_idx, int decrement=1) {
+    void release_ptr(uint32_t const ptr_idx, int const decrement=1) {
         auto& node = nodes_[ptr_idx]
-        const auto cnt = node.ref_cnt.fetch_sub(decrement, DEFERRED_RELEASE ? R : X) 
+        auto const cnt = node.ref_cnt.fetch_sub(decrement, DEFERRED_RELEASE ? R : X) 
         if (cnt == decrement) {
             if (DEFERRED_RELEASE == false) {
                 // wait for all slots to be closed
@@ -132,8 +132,8 @@ private
     }
 
     bool advance_ptr(std::atomic<TaggedPtr>& ptr, TaggedPtr& curr_val) {
-        const auto new_val = nodes_[curr_val.idx].next.load(C_atm)
-        const TaggedPtr null_ptr = {kNull, curr_val.tag}
+        auto const new_val = nodes_[curr_val.idx].next.load(C_atm)
+        TaggedPtr const null_ptr = {kNull, curr_val.tag}
         if (new_val != null_ptr) {
             if (ptr.compare_exchange_strong(curr_val, new_val, R, C_idx)) {
                 release_ptr(curr_val.idx)
@@ -151,7 +151,7 @@ private
             return true
 
         // no more nodes in the queue, attempt to allocate
-        const auto alloc_idx = freelist_.try_pop(curr_tail);
+        auto const alloc_idx = freelist_.try_pop(curr_tail);
         if (curr_tail.idx == kNull) {
             curr_tail = tail_.load(C_idx)
             return true
@@ -170,7 +170,7 @@ private
         while (!done) {
             auto& next_ptr = nodes_[curr_lead.idx].next
             auto curr_next = next_ptr.load(C_atm) 
-            const TaggedPtr null_ptr = {kNull, curr_lead.tag}
+            TaggedPtr const null_ptr = {kNull, curr_lead.tag}
             if (curr_next == null_ptr) {
                 if (next_ptr.compare_exchange_strong(curr_next, alloc_ptr, R, C_atm)) {
                     curr_next = alloc_ptr
@@ -227,7 +227,7 @@ private:
     };
 
     struct FreeList {
-        void push(uint32_t new_idx) {
+        void push(uint32_t const new_idx) {
             auto curr_head = head.load(X);
             TaggedPtr new_head = {new_idx};
             do {
@@ -236,10 +236,10 @@ private:
             } while (!head.compare_exchange_weak(curr_head, new_head, R, X));
         }
 
-        uint32_t try_pop(const TaggedPtr& q_tail) {
+        uint32_t try_pop(TaggedPtr const& q_tail) {
             auto curr_head = head.load(C_idx);
-            const auto& q_tail_node = nodes_[q_tail.idx] 
-            const TaggedPtr null_ptr = {kNull, q_tail.tag};
+            auto const& q_tail_node = nodes_[q_tail.idx] 
+            TaggedPtr const null_ptr = {kNull, q_tail.tag};
             TaggedPtr new_head;
  
             // check for empty list on each loop iteration
@@ -260,7 +260,7 @@ private:
     };
 
 private:
-    const size_t blocksize_; 
+    size_t const blocksize_;
     alignas(kCacheLineSize) std::atomic<TaggedPtr> head_;
     alignas(kCacheLineSize) std::atomic<TaggedPtr> tail_;
     alignas(kCacheLineSize) std::atomic<TaggedPtr> lead_;
