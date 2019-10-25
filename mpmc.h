@@ -50,69 +50,120 @@ private
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
         auto& node = nodes_[ptr.idx]
-        if (node.state == ptr.tag) {
-            // everything looks good, attempt to write
-            slot.item = std::forward<U>(v);
-            auto const prev_state = slot.state.exchange(node.state + 1, R);
-            if (prev_state == node.state) 
-                return true // success!
-
-            // consumer ABA occurred, recover item and close slot 
-            v = std::move(slot.item);
-            slot.state.store(node.state + 2, R);
-        } else {
+        if (node.state != ptr.tag) {
             // producer ABA occurred, close slot
             slot.state.exchange(node.state + 2, R);
+            return false
         }
 
+        // everything looks good, attempt to write
+        slot.item = std::forward<U>(v);
+        auto const prev_state = slot.state.exchange(node.state + 1, R);
+        if (prev_state == node.state) 
+            return true // success!
+
+        // consumer ABA occurred first, recover item and close slot 
+        std::atomic_thread_fence(A)
+        v = std::move(slot.item);
+        slot.state.store(node.state + 2, R);
         return false
     }
 
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
         auto& node = nodes_[ptr.idx]
-        if (node.state == ptr.tag) {
-            // everything looks good, attempt to write
-            slot.item = std::forward<U>(v);
-            auto const prev_state = slot.state.exchange(node.state + 2, R);
-            if (prev_state == node.state)
-                return true // success!
-
-            // consumer ABA occurred, recover item and increment reference count 
-            v = std::move(slot.item);
-            ++ref.cnt
-        } else {
+        if (node.state != ptr.tag) {
             // producer ABA occurred, invalidate slot
             auto const prev_state = slot.state.exchange(node.state + 1, R);
-            if (prev_state == node.state)
-                return false
- 
-            // consumer ABA occurred, close slot and increment reference count
-            slot.state.store(node.state + 2, X)
-            ++ref.cnt
+            if (prev_state != node.state) {
+                // consumer ABA occurred first, close slot and increment reference count
+                std::atomic_thread_fence(A)
+                slot.state.store(node.state + 2, X)
+                ++ref.cnt
+            }
+            return false
         }
 
+        // everything looks good, attempt to write
+        slot.item = std::forward<U>(v);
+        auto const prev_state = slot.state.exchange(node.state + 2, R);
+        if (prev_state == node.state)
+            return true // success!
+
+        // consumer ABA occurred first, recover item and increment reference count 
+        std::atomic_thread_fence(A)
+        v = std::move(slot.item);
+        ++ref.cnt
         return false
     }
 
-    bool pop_from_slot(T const& obj, Slot& slot, TaggedPtr ptr) noexcept {
+    bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr) noexcept {
         auto& node = nodes_[ptr.idx]
-        if (node.state == ptr.tag) {
-            // everything looks good, attempt to read
-            slot.item = std::forward<U>(v);
-            auto const prev_state = slot.state.exchange(node.state + 1, R);
-            if (prev_state == node.state) 
-                return true // success!
+        if (node.state != ptr.tag) {
+            // consumer ABA occurred, attempt to invalidate slot
+            auto curr_state = node.state;
+            if (slot.state.compare_exchange_strong(curr_state, node.state + 1, R, A))
+                return false // slot invalidated
+            
+            if (curr_state != node.state + 1)
+                return false // producer ABA occurred first
 
-            // consumer ABA occurred, recover item and close slot 
-            v = std::move(slot.item);
-            slot.state.store(node.state + 2, R);
-        } else {
-            // producer ABA occurred, close slot
-            slot.state.exchange(node.state + 2, R);
+            // producer wrote item first, success! grab item and close slot 
+            item = std::move(slot.item)
+            slot.state.store(node.state + 2, R)
+            return true
         }
 
-        return false
+        // everything looks good, attempt to read
+        uint32_t curr_state;
+        while ((curr_state = slot.state.load(A)) == node.state)
+            ;
+        
+        if (curr_state != node.state + 1)
+            return false // producer ABA occurred
+
+        // success! grab item and close slot
+        item = std::move(slot.item)
+        slot.state.store(node.state + 2, R)
+        return true
+    }
+
+    bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
+        auto& node = nodes_[ptr.idx]
+        if (node.state != ptr.tag) {
+            // consumer ABA occurred, attempt to invalidate slot
+            auto const prev_state = slot.state.exchange(node.state + 2, R)
+            if (prev_state == node.state)
+                return false // slot invalidated
+
+            // consumer owns slot, increment reference count
+            std::atomic_thread_fence(A)
+            ++ref.cnt 
+
+            if (prev_state == node.state + 1)
+                return false // producer ABA occurred first
+            
+            // producer wrote item first, success! grab item and close slot 
+            item = std::move(slot.item)
+            return true
+        }
+
+        // everything looks good, attempt to read
+        uint32_t curr_state;
+        while ((curr_state = slot.state.load(A)) == node.state)
+            ;
+        
+        ++ref.cnt // consumer owns slot, increment reference count
+        
+        if (curr_state == node.state + 1) {
+            // producer ABA occurred, close slot
+            slot.state.store(node.state + 2, X)
+            return false
+        }
+
+        // success! grab item and close slot
+        item = std::move(slot.item)
+        return true
     }
 
     void release_ptr(uint32_t const ptr_idx, int const decrement=1) {
@@ -221,7 +272,7 @@ private:
         // atomics
         alignas(kCacheLineSize) std::atomic<TaggedPtr> next = {kNull, 0};
         alignas(kCacheLineSize) std::atomic<uint32_t> free_next = kNull;
-        std::atomic<ssize_t> ref_cnt; // same cacheline as free next
+        std::atomic<size_t> ref_cnt; // same cacheline as free next
         alignas(kCacheLineSize) std::atomic<size_t> enq_idx = 0;
         alignas(kCacheLineSize) std::atomic<size_t> deq_idx = 0;
     };
