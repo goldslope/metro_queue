@@ -49,43 +49,42 @@ public:
 private
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
-        auto& node = nodes_[ptr.idx]
-        if (node.state != ptr.tag) {
-            // producer ABA occurred, handoff slot without validating
-            auto const prev_state = slot.state.exchange(node.state + 1, R);
-            if (prev_state != node.state) {
+        auto const s = nodes_[ptr.idx].state
+        if (s != ptr.tag) {
+            // producer ABA occurred, invalidate slot
+            auto const prev_state = slot.state.exchange(INVALID_PRODUCER(s), R);
+            if (prev_state == INVALID_CONSUMER(s)) {
                 // consumer ABA occurred first, close slot
                 std::atomic_thread_fence(A)
-                slot.state.store(node.state + 2, R)
+                slot.state.store(CLOSED(s), R)
             }
             return false
         }
 
         // everything looks good, attempt to write
         slot.item = std::forward<U>(v);
-        slot.valid = true
-        auto const prev_state = slot.state.exchange(node.state + 1, R);
-        if (prev_state == node.state) 
+        auto const prev_state = slot.state.exchange(PUSHED(s), R);
+        if (prev_state == OPEN(s)) 
             return true // success!
 
         // consumer ABA occurred first, recover item and close slot 
-        std::atomic_thread_fence(A)
+        assert(prev_state == INVALID_CONSUMER(s))
+        std::atomic_thread_fence(A);
         v = std::move(slot.item);
-        slot.valid = false
-        slot.state.store(node.state + 2, R);
+        slot.state.store(CLOSED(s), R);
         return false
     }
 
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
-        auto& node = nodes_[ptr.idx]
-        if (node.state != ptr.tag) {
+        auto const s = nodes_[ptr.idx].state
+        if (s != ptr.tag) {
             // producer ABA occurred, invalidate slot
-            auto const prev_state = slot.state.exchange(node.state + 1, R);
-            if (prev_state != node.state) {
+            auto const prev_state = slot.state.exchange(INVALID_PRODUCER(s), R);
+            if (prev_state == INVALID_CONSUMER(s)) {
                 // consumer ABA occurred first, close slot and increment reference count
                 std::atomic_thread_fence(A)
-                slot.state.store(node.state + 2, X)
+                slot.state.store(CLOSED(s), X)
                 ++ref.cnt
             }
             return false
@@ -93,92 +92,101 @@ private
 
         // everything looks good, attempt to write
         slot.item = std::forward<U>(v);
-        auto const prev_state = slot.state.exchange(node.state + 2, R);
-        if (prev_state == node.state)
+        auto const prev_state = slot.state.exchange(PUSHED(s), R);
+        if (prev_state == OPEN(s))
             return true // success!
 
         // consumer ABA occurred first, recover item and increment reference count 
-        std::atomic_thread_fence(A)
+        assert(prev_state == INVALID_CONSUMER(s))
+        std::atomic_thread_fence(A);
         v = std::move(slot.item);
         ++ref.cnt
         return false
     }
 
     bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr) noexcept {
-        auto& node = nodes_[ptr.idx]
-        if (node.state != ptr.tag) {
+        auto const s = nodes_[ptr.idx].state
+        if (s != ptr.tag) {
             // consumer ABA occurred, attempt to invalidate slot
-            auto const prev_state = slot.state.exchange(node.state + 1, R)
-            if (prev_state == node.state)
+            auto const prev_state = slot.state.exchange(INVALID_CONSUMER(s), R)
+            if (prev_state == OPEN(s))
                 return false // slot invalidated
 
             std::atomic_thread_fence(A)
 
-            if (!slot.valid) {
+            if (prev_state == INVALID_PRODUCER(s)) {
                 // producer ABA occurred first, close slot
-                slot.state.store(node.state + 2, R)
+                slot.state.store(CLOSED(s), R)
                 return false
             }
 
             // producer wrote item first, success! grab item and close slot 
+            assert(prev_state == PUSHED(s))
             item = std::move(slot.item)
-            slot.valid = false
-            slot.state.store(node.state + 2, R)
+            slot.state.store(CLOSED(s), R)
             return true
         }
 
         // everything looks good, attempt to read
-        while (slot.state.load(A) == node.state)
+        uint32_t curr_state;
+        while ((curr_state = slot.state.load(A)) == OPEN(s))
             ;
 
-        if (!slot.valid) {
+        if (curr_state == INVALID_PRODUCER(s)) {
             // producer ABA occurred, close slot
-            slot.state.store(node.state + 2, R)
+            slot.state.store(CLOSED(s), R)
             return false
         }
 
         // success! grab item and close slot
+        assert(curr_state == PUSHED(s))
         item = std::move(slot.item)
-        slot.valid = false
-        slot.state.store(node.state + 2, R)
+        slot.state.store(CLOSED(s), R)
         return true
     }
 
     bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
-        auto& node = nodes_[ptr.idx]
-        if (node.state != ptr.tag) {
+        auto const s = nodes_[ptr.idx].state
+        if (s != ptr.tag) {
             // consumer ABA occurred, attempt to invalidate slot
-            auto const prev_state = slot.state.exchange(node.state + 2, R)
-            if (prev_state == node.state)
+            auto const new_state = INVALID_CONSUMER(s)
+            auto const prev_state = slot.state.exchange(new_state, R)
+            if (prev_state == OPEN(s))
                 return false // slot invalidated
 
             // consumer owns slot, increment reference count
             std::atomic_thread_fence(A)
             ++ref.cnt 
 
-            if (prev_state == node.state + 1)
+            if (prev_state == INVALID_PRODUCER(s)) {
+                assert(new_state == CLOSED(s))
                 return false // producer ABA occurred first
+            }
 
-            // producer wrote item first, success! grab item and close slot 
+            // producer wrote item first, success! grab item
+            assert(prev_state == PUSHED(s))
             item = std::move(slot.item)
+            assert(new_state == CLOSED(s))
             return true
         }
 
         // everything looks good, attempt to read
         uint32_t curr_state;
-        while ((curr_state = slot.state.load(A)) == node.state)
+        while ((curr_state = slot.state.load(A)) == OPEN(s))
             ;
 
         ++ref.cnt // consumer owns slot, increment reference count
 
-        if (curr_state == node.state + 1) {
+        if (curr_state == INVALID_PRODUCER(s)) {
             // producer ABA occurred, close slot
-            slot.state.store(node.state + 2, X)
+            slot.state.store(CLOSED(s), X)
             return false
         }
 
-        // success! grab item and close slot
+        // success! grab item
+        assert(curr_state == PUSHED(s))
         item = std::move(slot.item)
+        assert(curr_state == CLOSED(s))
         return true
     }
 
@@ -186,10 +194,10 @@ private
         auto& node = nodes_[ptr_idx]
         auto const cnt = node.ref_cnt.fetch_sub(decrement, DEFERRED_RELEASE ? R : X) 
         if (cnt == decrement) {
-            if (DEFERRED_RELEASE == false) {
+            if (!DEFERRED_RELEASE) {
                 // wait for all slots to be closed
                 for (size_t i = 0; i < blocksize_; ++i) {
-                    while (node.slots[i].state != node.state + 2)
+                    while (node.slots[i].state != CLOSED(node.state))
                         ;
                 }
             }
@@ -257,9 +265,14 @@ private:
     static constexpr size_t kCacheLineSize = 128;
     static constexpr uint32_t kNull = 0xFFFFFFFF;
 
+    static constexpr uint32_t OPEN(uint32_t const s) noexcept {return s}
+    static constexpr uint32_t PUSHED(uint32_t const s) noexcept {return s + 2}
+    static constexpr uint32_t INVALID_PRODUCER(uint32_t const s) noexcept {return s + 1}
+    static constexpr uint32_t INVALID_CONSUMER(uint32_t const s) noexcept {return s + 2}
+    static constexpr uint32_t CLOSED(uint32_t const s) noexcept {return s + (DEFERRED_RELEASE ? 2 : 3)}
+    
     struct alignas(kCacheLineSize) Slot {
         std::atomic<uint32_t> state = 0;
-        bool valid = false;
         T item;
     };
 
@@ -273,7 +286,7 @@ private:
         ~Node() { delete[] slots }
     
         void reset noexcept() {
-            state += 2 
+            state = CLOSED(state)
             ref_count.store(num_references(), X)
             enq_idx.store(0, R) // release to synchronize with producers
             deq_idx.store(0, R) // release to synchronize with consumers
