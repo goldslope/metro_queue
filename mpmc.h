@@ -63,7 +63,8 @@ private
 
         // everything looks good, attempt to write
         slot.item = std::forward<U>(v);
-        auto const prev_state = slot.state.exchange(PUSHED(s), R);
+        auto const new_state = PUSHED(s)
+        auto const prev_state = slot.state.exchange(new_state, R);
         if (prev_state == OPEN(s)) 
             return true // success!
 
@@ -92,7 +93,8 @@ private
 
         // everything looks good, attempt to write
         slot.item = std::forward<U>(v);
-        auto const prev_state = slot.state.exchange(PUSHED(s), R);
+        auto const new_state = PUSHED(s)
+        auto const prev_state = slot.state.exchange(new_state, R);
         if (prev_state == OPEN(s))
             return true // success!
 
@@ -100,6 +102,7 @@ private
         assert(prev_state == INVALID_CONSUMER(s))
         std::atomic_thread_fence(A);
         v = std::move(slot.item);
+        assert(new_state == CLOSED(s))
         ++ref.cnt
         return false
     }
@@ -108,7 +111,8 @@ private
         auto const s = nodes_[ptr.idx].state
         if (s != ptr.tag) {
             // consumer ABA occurred, attempt to invalidate slot
-            auto const prev_state = slot.state.exchange(INVALID_CONSUMER(s), R)
+            auto const new_state = INVALID_CONSUMER(s)
+            auto const prev_state = slot.state.exchange(new_state, R)
             if (prev_state == OPEN(s))
                 return false // slot invalidated
 
@@ -159,8 +163,9 @@ private
             ++ref.cnt 
 
             if (prev_state == INVALID_PRODUCER(s)) {
+                // producer ABA occurred first
                 assert(new_state == CLOSED(s))
-                return false // producer ABA occurred first
+                return false
             }
 
             // producer wrote item first, success! grab item
