@@ -132,7 +132,7 @@ private
         }
 
         // everything looks good, attempt to read
-        uint32_t curr_state;
+        state_t curr_state;
         while ((curr_state = slot.state.load(mo::acq)) == open(s))
             ;
 
@@ -176,7 +176,7 @@ private
         }
 
         // everything looks good, attempt to read
-        uint32_t curr_state;
+        state_t curr_state;
         while ((curr_state = slot.state.load(mo::acq)) == open(s))
             ;
 
@@ -195,7 +195,7 @@ private
         return true
     }
 
-    void release_ptr(uint32_t const ptr_idx, int const sub_cnt=1) {
+    void release_ptr(index_t const ptr_idx, int const sub_cnt=1) {
         auto& node = nodes_[ptr_idx]
         auto const prev_cnt = node.ref_cnt.fetch_sub(sub_cnt, mem_hold ? mo::rls : mo::lax)
         if (prev_cnt == sub_cnt) {
@@ -268,22 +268,22 @@ private
 
 private:
     static constexpr size_t cache_line_size = 128;
-    static constexpr uint32_t null_idx = 0xFFFFFFFF;
+    static constexpr index_t null_idx = 0xFFFFFFFF;
 
-    static constexpr uint32_t open(uint32_t const s) noexcept {return s}
-    static constexpr uint32_t pushed(uint32_t const s) noexcept {return s + 2}
-    static constexpr uint32_t invalid_producer(uint32_t const s) noexcept {return s + 1}
-    static constexpr uint32_t invalid_consumer(uint32_t const s) noexcept {return s + 2}
-    static constexpr uint32_t closed(uint32_t const s) noexcept {return s + (mem_hold ? 2 : 3)}
+    static constexpr state_t open(state_t const s) noexcept {return s}
+    static constexpr state_t pushed(state_t const s) noexcept {return s + 2}
+    static constexpr state_t invalid_producer(state_t const s) noexcept {return s + 1}
+    static constexpr state_t invalid_consumer(state_t const s) noexcept {return s + 2}
+    static constexpr state_t closed(state_t const s) noexcept {return s + (mem_hold ? 2 : 3)}
     
     struct alignas(cache_line_size) Slot {
-        std::atomic<uint32_t> state = 0;
+        std::atomic<state_t> state = 0;
         T item;
     };
 
     struct TaggedPtr {
-        uint32_t idx;
-        uint32_t tag;
+        index_t idx;
+        state_t tag;
     };
 
     struct Node {
@@ -306,14 +306,14 @@ private:
         
         // atomics
         alignas(cache_line_size) std::atomic<TaggedPtr> next = {null_idx, 0};
-        alignas(cache_line_size) std::atomic<uint32_t> free_next = null_idx;
+        alignas(cache_line_size) std::atomic<index_t> free_next = null_idx;
         std::atomic<size_t> ref_cnt; // same cacheline as free next
         alignas(cache_line_size) std::atomic<size_t> enq_idx = 0;
         alignas(cache_line_size) std::atomic<size_t> deq_idx = 0;
     };
 
     struct FreeList {
-        void push(uint32_t const new_idx) {
+        void push(index_t const new_idx) {
             auto curr_head = head.load(mo::lax);
             TaggedPtr new_head = {new_idx};
             do {
@@ -322,7 +322,7 @@ private:
             } while (!head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::lax));
         }
 
-        uint32_t try_pop(TaggedPtr const& q_tail) {
+        index_t try_pop(TaggedPtr const& q_tail) {
             auto curr_head = head.load(mo::csm);
             auto const& q_tail_node = nodes_[q_tail.idx] 
             TaggedPtr const null_ptr = {null_idx, q_tail.tag};
