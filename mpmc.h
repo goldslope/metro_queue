@@ -21,29 +21,81 @@ public:
     MPMCQueue& operator=(MPMCQueue const&) = delete;
 
     void push(T&& v) noexcept {
+        while (!try_push(v))
+            ;
     }
 
     bool try_push(T&& v) noexcept {
-        auto success = false; 
-        auto ptr = tail_.load(mo::csm) 
+        auto curr_tail = tail_.load(mo::csm)
 
-        while (!success) {
-            auto& node = nodes_[ptr.idx]
+        for (;;) {
+            auto& node = nodes_[curr_tail.idx]
             auto const enq_idx = node.enq_idx.fetch_add(1, mo::acq)
             if (enq_idx < block_size_) {
-                // there is room for us, try pushing to slot
-                success = push_to_slot(std::forward<T>(v), node.slots[enq_idx], ptr);
+                // slot acquired, try pushing to slot
+                if (push_to_slot(std::forward<T>(v), node.slots[enq_idx], curr_tail))
+                    break;
             } else {
-                if (!get_next_tail(ptr))
-                    return false
+                if (!get_next_tail(curr_tail))
+                    return false // full
+            }
+        }
+        return true
+    }
+
+    void pop(T& v) noexcept {
+        auto curr_head = head_.load(mo::csm)
+
+        for (;;) {
+            auto& node = nodes_[curr_head.idx]
+            auto const deq_idx = node.deq_idx.fetch_add(1, mo::acq)
+            if (deq_idx < block_size_) {
+                // slot acquired, try popping from slot
+                if (pop_from_slot(v, node.slots[deq_idx], curr_head))
+                    break;
+            } else {
+                while (!advance_ptr(head_, curr_head))
+                    ;
             }
         }
     }
 
-    void pop(T& v) noexcept {
-    }
-
     bool try_pop(T& v) noexcept {
+        auto curr_head = head_.load(mo::csm)
+
+        for (;;) {
+            auto& node = nodes_[curr_head.idx]
+            size_t deq_idx, enq_idx;
+            deq_idx = 0
+            while ((enq_idx = node.enq_idx.load(mo::lax)) < block_size_ && deq_idx < enq_idx) {
+                auto const next_idx = deq_idx + 1
+                if (node.deq_idx.compare_exchange_weak(deq_idx, next_idx, mo::acq, mo::lax)) {
+                    // slot acquired, try popping from slot
+                    if (pop_from_slot(v, node.slots[deq_idx], curr_head))
+                        break;
+                }
+            }
+
+            if (deq_idx >= enq_idx) {
+                auto const prev_head = curr_head
+                curr_head = head_.load(mo::csm)
+                if (prev_head == curr_head)
+                    return false // empty
+                else
+                    continue
+            }
+
+            // producers have filled the block, attempt dequeue optimistically
+            deq_idx = node.deq_idx.fetch_add(1, mo::acq)
+            if (deq_idx < block_size_) {
+                // slot acquired, try popping from slot
+                if (pop_from_slot(v, node.slots[deq_idx], curr_head))
+                    break;
+            }
+            else if (!advance_ptr(head_, curr_head))
+                return false // empty
+        }
+        return true
     }
 
 private
@@ -107,7 +159,7 @@ private
         return false
     }
 
-    bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr) noexcept {
+    bool pop_from_slot(T& v, Slot& slot, TaggedPtr ptr) noexcept {
         auto const s = nodes_[ptr.idx].state
         if (s != ptr.tag) {
             // consumer ABA occurred, attempt to invalidate slot
@@ -126,7 +178,7 @@ private
 
             // producer wrote item first, success! grab item and close slot 
             assert(prev_state == pushed(s))
-            item = std::move(slot.item)
+            v = std::move(slot.item)
             slot.state.store(closed(s), mo::rls)
             return true
         }
@@ -144,7 +196,7 @@ private
 
         // success! grab item and close slot
         assert(curr_state == pushed(s))
-        item = std::move(slot.item)
+        v = std::move(slot.item)
         slot.state.store(closed(s), mo::rls)
         return true
     }
@@ -170,7 +222,7 @@ private
 
             // producer wrote item first, success! grab item
             assert(prev_state == pushed(s))
-            item = std::move(slot.item)
+            v = std::move(slot.item)
             assert(new_state == closed(s))
             return true
         }
@@ -190,7 +242,7 @@ private
 
         // success! grab item
         assert(curr_state == pushed(s))
-        item = std::move(slot.item)
+        v = std::move(slot.item)
         assert(curr_state == closed(s))
         return true
     }
@@ -246,7 +298,7 @@ private
         // append new node to end of the queue 
         TaggedPtr alloc_ptr = {alloc_idx, alloc_node.state}
         auto curr_lead = lead_.load(mo::csm)
-        bool done = false
+        auto done = false
         while (!done) {
             auto& next_ptr = nodes_[curr_lead.idx].next
             auto curr_next = next_ptr.load(mo::csm) 
