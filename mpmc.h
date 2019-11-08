@@ -20,60 +20,146 @@ public:
     MPMCQueue(MPMCQueue const&) = delete;
     MPMCQueue& operator=(MPMCQueue const&) = delete;
 
-    void push(T&& v) noexcept {
-        while (!try_push(v))
+    template <typename U>
+    void push(U&& v) noexcept {
+        while (!try_push(std::forward<U>(v))
             ;
     }
 
-    bool try_push(T&& v) noexcept {
+    template <typename U>
+    bool try_push(U&& v) noexcept {
         auto curr_tail = tail_.load(mo::csm)
+        auto& ref = NodeRef(this)
 
         for (;;) {
             auto& node = nodes_[curr_tail.idx]
             auto const enq_idx = node.enq_idx.fetch_add(1, mo::acq)
-            if (enq_idx < block_size_) {
+            if (enq_idx < slots_per_node_) {
                 // slot acquired, try pushing to slot
-                if (push_to_slot(std::forward<T>(v), node.slots[enq_idx], curr_tail))
-                    break;
+                auto const& slot = node.slots[enq_idx]
+                if (mem_hold) {
+                    if (push_to_slot(std::forward<U>(v), slot, curr_tail, ref))
+                        break;
+                } else {
+                    if (push_to_slot(std::forward<U>(v), slot, curr_tail))
+                        break;
+                }
             } else {
                 if (!get_next_tail(curr_tail))
                     return false // full
             }
         }
+
+        if (mem_hold)
+            ref.release()
         return true
     }
 
     void pop(T& v) noexcept {
+        pop(v)
+    }
+
+    void try_pop(T& v) noexcept {
+        try_pop(v)
+    }
+
+    void pop(T& v, NodeRef& ref) noexcept {
+        static_assert(mem_hold == true)
+        pop(v, ref, false)
+    }
+
+    void try_pop(T& v, NodeRef& ref) noexcept {
+        static_assert(mem_hold == true)
+        try_pop(v, ref, false)
+    }
+
+public:
+    class NodeRef {
+    public:
+        explicit NodeRef(MPMCQueue<T, true>* q) : queue(q), idx(null_idx), cnt(0) {}
+        ~NodeRef() {release();}
+
+        // non-copyable and non-movable
+        NodeRef(NodeRef const&) = delete;
+        NodeRef& operator=(NodeRef const&) = delete;
+
+        release() {
+            if (cnt > 0 && idx != null_idx) {
+                queue->remove_node_reference(idx, cnt);
+                cnt = 0
+            }
+        }
+    private:
+        MPMCQueue<T, true>* queue;
+        index_t idx;
+        size_t cnt;
+    }
+
+private:
+    void pop(T& v, NodeRef& ref=NodeRef(this), bool inst_rls=true) noexcept {
         auto curr_head = head_.load(mo::csm)
 
         for (;;) {
+            if (mem_hold) {
+                if (ref.idx != curr_head.idx || ref.queue != this) {
+                    ref.release()
+                    ref.queue = this
+                    ref.idx = curr_head.idx
+                }
+            }
+
             auto& node = nodes_[curr_head.idx]
             auto const deq_idx = node.deq_idx.fetch_add(1, mo::acq)
-            if (deq_idx < block_size_) {
+            if (deq_idx < slots_per_node_) {
                 // slot acquired, try popping from slot
-                if (pop_from_slot(v, node.slots[deq_idx], curr_head))
-                    break;
+                auto const& slot = node.slots[deq_idx]
+                if (mem_hold) {
+                    if (pop_from_slot(v, slot, curr_head, ref))
+                        break;
+                } else {
+                    if (pop_from_slot(v, slot, curr_head))
+                        break;
+                }
             } else {
                 while (!advance_ptr(head_, curr_head))
                     ;
             }
         }
+
+        if (mem_hold && inst_rls)
+            ref.release()
     }
 
-    bool try_pop(T& v) noexcept {
+    bool try_pop(T& v, NodeRef& ref=NodeRef(this), bool inst_rls=true) noexcept {
         auto curr_head = head_.load(mo::csm)
 
         for (;;) {
+            if (mem_hold) {
+                if (ref.idx != curr_head.idx || ref.queue != this) {
+                    ref.release()
+                    ref.queue = this
+                    ref.idx = curr_head.idx
+                }
+            }
+
             auto& node = nodes_[curr_head.idx]
             size_t deq_idx, enq_idx;
             deq_idx = 0
-            while ((enq_idx = node.enq_idx.load(mo::lax)) < block_size_ && deq_idx < enq_idx) {
-                auto const next_idx = deq_idx + 1
-                if (node.deq_idx.compare_exchange_weak(deq_idx, next_idx, mo::acq, mo::lax)) {
+            enq_idx = node.enq_idx.load(mo::lax)
+            while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
+                auto const new_idx = deq_idx + 1
+                if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     // slot acquired, try popping from slot
-                    if (pop_from_slot(v, node.slots[deq_idx], curr_head))
-                        break;
+                    auto const& slot = node.slots[deq_idx]
+                    if (mem_hold) {
+                        if (pop_from_slot(v, slot, curr_head, ref))
+                            break;
+                    } else {
+                        if (pop_from_slot(v, slot, curr_head))
+                            break;
+                    }
                 }
+                enq_idx = node.enq_idx.load(mo::lax)
             }
 
             if (deq_idx >= enq_idx) {
@@ -87,14 +173,23 @@ public:
 
             // producers have filled the block, attempt dequeue optimistically
             deq_idx = node.deq_idx.fetch_add(1, mo::acq)
-            if (deq_idx < block_size_) {
+            if (deq_idx < slots_per_node_) {
                 // slot acquired, try popping from slot
-                if (pop_from_slot(v, node.slots[deq_idx], curr_head))
-                    break;
+                auto const& slot = node.slots[deq_idx]
+                if (mem_hold) {
+                    if (pop_from_slot(v, slot, curr_head, ref))
+                        break;
+                } else {
+                    if (pop_from_slot(v, slot, curr_head))
+                        break;
+                }
             }
             else if (!advance_ptr(head_, curr_head))
                 return false // empty
         }
+
+        if (mem_hold && inst_rls)
+            ref.release()
         return true
     }
 
@@ -247,19 +342,19 @@ private
         return true
     }
 
-    void release_ptr(index_t const ptr_idx, int const sub_cnt=1) {
-        auto& node = nodes_[ptr_idx]
-        auto const prev_cnt = node.ref_cnt.fetch_sub(sub_cnt, mem_hold ? mo::rls : mo::lax)
-        if (prev_cnt == sub_cnt) {
+    void remove_node_reference(index_t const node_idx, int const rmv_cnt=1) {
+        auto& node = nodes_[idx]
+        auto const prev_cnt = node.ref_cnt.fetch_sub(rmv_cnt, mem_hold ? mo::rls : mo::lax)
+        if (prev_cnt == rmv_cnt) {
             if (!mem_hold) {
                 // wait for all slots to be closed
-                for (size_t i = 0; i < block_size_; ++i) {
+                for (size_t i = 0; i < slots_per_node_; ++i) {
                     while (node.slots[i].state != closed(node.state))
                         ;
                 }
             }
             std::atomic_thread_fence(mo::acq) // synchronize with all releases
-            freelist_.push(ptr_idx)
+            freelist_.push(idx)
         }
     }
 
@@ -268,7 +363,7 @@ private
         TaggedPtr const null_ptr = {null_idx, curr_val.tag}
         if (new_val != null_ptr) {
             if (ptr.compare_exchange_strong(curr_val, new_val, mo::rls, mo::csm)) {
-                release_ptr(curr_val.idx)
+                remove_node_reference(curr_val.idx)
                 curr_val = new_val
             }
             return true
@@ -297,20 +392,20 @@ private
 
         // append new node to end of the queue 
         TaggedPtr alloc_ptr = {alloc_idx, alloc_node.state}
-        auto curr_lead = lead_.load(mo::csm)
+        auto curr_back = back_.load(mo::csm)
         auto done = false
         while (!done) {
-            auto& next_ptr = nodes_[curr_lead.idx].next
+            auto& next_ptr = nodes_[curr_back.idx].next
             auto curr_next = next_ptr.load(mo::csm) 
-            TaggedPtr const null_ptr = {null_idx, curr_lead.tag}
+            TaggedPtr const null_ptr = {null_idx, curr_back.tag}
             if (curr_next == null_ptr) {
                 if (next_ptr.compare_exchange_strong(curr_next, alloc_ptr, mo::rls, mo::csm)) {
                     curr_next = alloc_ptr
                     done = true
                 }
             }
-            if (lead_.compare_exchange_strong(curr_lead, curr_next, mo::rls, mo::csm))
-                release_ptr(curr_lead.idx)
+            if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm))
+                remove_node_reference(curr_back.idx)
         }
 
         // now that new node is added, advance the tail
@@ -339,9 +434,10 @@ private:
     };
 
     struct Node {
-        Node() : slots(new Slots[block_size_]), ref_cnt(num_refs()) {}
-        ~Node() { delete[] slots }
-    
+        explicit Node(size_t const capacity) :
+            num_slots(capacity), slots(new Slot[num_slots]), ref_cnt(num_refs()) {}
+        ~Node() {delete[] slots}
+
         void reset noexcept() {
             state = closed(state)
             ref_count.store(num_refs(), mo::lax)
@@ -350,12 +446,13 @@ private:
             next.store({null_idx, state}, mo::lax) // not included in synchronization
         }
 
-        // head_, tail_, lead_ = 3 pointers = 3 references
-        constexpr size_t num_refs() const noexcept {return mem_hold ? block_size_ + 3 : 3}
- 
+        // head_, tail_, back_ = 3 pointers = 3 references
+        constexpr size_t num_refs() const noexcept {return mem_hold ? num_slots + 3 : 3}
+
+        size_t const num_slots;
         Slot* slots;
-        alignas(cache_line_size) state = 0;
-        
+        state = 0;
+
         // atomics
         alignas(cache_line_size) std::atomic<TaggedPtr> next = {null_idx, 0};
         alignas(cache_line_size) std::atomic<index_t> free_next = null_idx;
@@ -398,8 +495,8 @@ private:
     };
 
 private:
-    size_t const block_size_;
+    size_t const slots_per_node_;
     alignas(cache_line_size) std::atomic<TaggedPtr> head_;
     alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
-    alignas(cache_line_size) std::atomic<TaggedPtr> lead_;
+    alignas(cache_line_size) std::atomic<TaggedPtr> back_;
 };
