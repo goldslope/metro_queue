@@ -29,7 +29,7 @@ public:
     template <typename U>
     bool try_push(U&& v) noexcept {
         auto curr_tail = tail_.load(mo::csm)
-        auto& ref = NodeRef(this)
+        auto& ref = TempNodeRef(this)
 
         for (;;) {
             auto& node = nodes_[curr_tail.idx]
@@ -55,28 +55,24 @@ public:
         return true
     }
 
-    void pop(T& v) noexcept {
-        pop(v)
-    }
-
     void try_pop(T& v) noexcept {
-        try_pop(v)
-    }
-
-    void pop(T& v, NodeRef& ref) noexcept {
-        static_assert(mem_hold == true)
-        pop(v, ref, false)
+        return try_pop<TempNodeRef>(v, TempNodeRef(this))
     }
 
     void try_pop(T& v, NodeRef& ref) noexcept {
         static_assert(mem_hold == true)
-        try_pop(v, ref, false)
+
+        if (ref.queue.get() != this)
+            return try_pop<TempNodeRef>(v, TempNodeRef(this))
+
+        return try_pop<NodeRef>(v, ref)
     }
 
 public:
     class NodeRef {
     public:
-        explicit NodeRef(MPMCQueue<T, true>* q) : queue(q), idx(null_idx), cnt(0) {}
+        explicit NodeRef(std::shared_ptr<MPMCQueue<T, true>> q) :
+            queue(q), idx(null_idx), cnt(0) {}
         ~NodeRef() {release();}
 
         // non-copyable and non-movable
@@ -90,54 +86,38 @@ public:
             }
         }
     private:
-        MPMCQueue<T, true>* queue;
+        std::shared_ptr<MPMCQueue<T, true>> const queue;
         index_t idx;
         size_t cnt;
     }
 
 private:
-    void pop(T& v, NodeRef& ref=NodeRef(this), bool inst_rls=true) noexcept {
-        auto curr_head = head_.load(mo::csm)
+    class TempNodeRef {
+    public:
+        TempNodeRef(MPMCQueue* q) : queue(q), idx(null_idx), cnt(0) {}
+        ~TempNodeRef() {release();}
 
-        for (;;) {
-            if (mem_hold) {
-                if (ref.idx != curr_head.idx || ref.queue != this) {
-                    ref.release()
-                    ref.queue = this
-                    ref.idx = curr_head.idx
-                }
-            }
-
-            auto& node = nodes_[curr_head.idx]
-            auto const deq_idx = node.deq_idx.fetch_add(1, mo::acq)
-            if (deq_idx < slots_per_node_) {
-                // slot acquired, try popping from slot
-                auto const& slot = node.slots[deq_idx]
-                if (mem_hold) {
-                    if (pop_from_slot(v, slot, curr_head, ref))
-                        break;
-                } else {
-                    if (pop_from_slot(v, slot, curr_head))
-                        break;
-                }
-            } else {
-                while (!advance_ptr(head_, curr_head))
-                    ;
+        release() {
+            if (cnt > 0 && idx != null_idx) {
+                queue->remove_node_reference(idx, cnt);
+                cnt = 0
             }
         }
-
-        if (mem_hold && inst_rls)
-            ref.release()
+    private:
+        MPMCQueue* const queue;
+        index_t idx;
+        size_t cnt;
     }
 
-    bool try_pop(T& v, NodeRef& ref=NodeRef(this), bool inst_rls=true) noexcept {
+private:
+    template <typename NodeRefType>
+    bool try_pop(T& v, NodeRefType& ref) noexcept {
         auto curr_head = head_.load(mo::csm)
 
         for (;;) {
             if (mem_hold) {
-                if (ref.idx != curr_head.idx || ref.queue != this) {
+                if (ref.idx != curr_head.idx) {
                     ref.release()
-                    ref.queue = this
                     ref.idx = curr_head.idx
                 }
             }
@@ -188,12 +168,11 @@ private:
                 return false // empty
         }
 
-        if (mem_hold && inst_rls)
+        if (mem_hold && std::is_same_v<NodeRefType, TempNodeRef>)
             ref.release()
         return true
     }
 
-private
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
         auto const s = nodes_[ptr.idx].state
