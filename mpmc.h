@@ -20,52 +20,29 @@ public:
     MPMCQueue(MPMCQueue const&) = delete;
     MPMCQueue& operator=(MPMCQueue const&) = delete;
 
-    template <typename U>
-    void push(U&& v) noexcept {
-        while (!try_push(std::forward<U>(v))
-            ;
+    // TODO: enforce iterator traits
+    // random_access_tag
+    // reference is an actual reference
+
+    bool try_push(T const& v) noexcept {
+        return try_push(&v, 1)
     }
 
-    template <typename U>
-    bool try_push(U&& v) noexcept {
-        auto curr_tail = tail_.load(mo::csm)
-        auto& ref = TempNodeRef(this)
-
-        for (;;) {
-            auto& node = nodes_[curr_tail.idx]
-            auto const enq_idx = node.enq_idx.fetch_add(1, mo::acq)
-            if (enq_idx < slots_per_node_) {
-                // slot acquired, try pushing to slot
-                auto const& slot = node.slots[enq_idx]
-                if (mem_hold) {
-                    if (push_to_slot(std::forward<U>(v), slot, curr_tail, ref))
-                        break;
-                } else {
-                    if (push_to_slot(std::forward<U>(v), slot, curr_tail))
-                        break;
-                }
-            } else {
-                if (!get_next_tail(curr_tail))
-                    return false // full
-            }
-        }
-
-        if (mem_hold)
-            ref.release()
-        return true
+    bool try_push(T&& v) noexcept {
+        return try_push<move = true>(&v, 1)
     }
 
-    void try_pop(T& v) noexcept {
-        return try_pop<TempNodeRef>(v, TempNodeRef(this))
+    bool try_pop(T& v) noexcept {
+        return try_pop(&v, 1, TempNodeRef(this))
     }
 
-    void try_pop(T& v, NodeRef& ref) noexcept {
+    bool try_pop(T& v, NodeRef& ref) noexcept {
         static_assert(mem_hold == true)
 
         if (ref.queue.get() != this)
-            return try_pop<TempNodeRef>(v, TempNodeRef(this))
+            return try_pop(&v, 1, TempNodeRef(this))
 
-        return try_pop<NodeRef>(v, ref)
+        return try_pop(&v, 1, ref)
     }
 
 public:
@@ -98,7 +75,7 @@ private:
         ~TempNodeRef() {release();}
 
         release() {
-            if (cnt > 0 && idx != null_idx) {
+            if (memhold && cnt > 0 && idx != null_idx) {
                 queue->remove_node_reference(idx, cnt);
                 cnt = 0
             }
@@ -110,8 +87,44 @@ private:
     }
 
 private:
-    template <typename NodeRefType>
-    bool try_pop(T& v, NodeRefType& ref) noexcept {
+    template <typename Iter, bool move=false>
+    size_t try_push(Iter it, size_t const cnt) noexcept(std::is_pointer_v(Iter)) {
+        size_t push_cnt = 0
+        auto curr_tail = tail_.load(mo::csm)
+        auto& ref = TempNodeRef(this)
+
+        for (;;) {
+            auto& node = nodes_[curr_tail.idx]
+            auto enq_idx = node.enq_idx.fetch_add(cnt, mo::acq)
+            if (enq_idx > slots_per_node_) {
+                auto slot_cnt = cnt
+                do {
+                    // slot acquired, try pushing to slot
+                    bool ret;
+                    auto const& slot = node.slots[enq_idx]
+                    std::conditional_t<move, T&&, T const&> v = move ? std::move(*it) : *it
+                    if (mem_hold)
+                        ret = push_to_slot(v, slot, curr_tail, ref)
+                    else
+                        ret = push_to_slot(v, slot, curr_tail)
+                    it += ret
+                    push_cnt += ret
+                } while (--slot_cnt > 0 && ++enq_idx < slots_per_node_)
+
+                if (push_cnt > 0)
+                    break;
+            }
+
+            if (enq_idx >= slots_per_node_ && !get_next_tail(curr_tail))
+                break; // full
+        }
+
+        return push_cnt
+    }
+
+    template <Iter it, typename NodeRefType>
+    bool try_pop(Iter it, size_t cnt, NodeRefType& ref) noexcept(std::is_pointer_v(Iter)) {
+        size_t pop_cnt = 0
         auto curr_head = head_.load(mo::csm)
 
         for (;;) {
@@ -127,17 +140,22 @@ private:
             deq_idx = 0
             enq_idx = node.enq_idx.load(mo::lax)
             while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
-                auto const new_idx = deq_idx + 1
+                auto const new_idx = deq_idx + std::min(cnt, enq_idx - deq_idx)
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
-                    // slot acquired, try popping from slot
-                    auto const& slot = node.slots[deq_idx]
-                    if (mem_hold) {
-                        if (pop_from_slot(v, slot, curr_head, ref))
-                            break;
-                    } else {
-                        if (pop_from_slot(v, slot, curr_head))
-                            break;
-                    }
+                    do {
+                        // slot acquired, try popping from slot
+                        bool ret;
+                        auto const& slot = node.slots[deq_idx]
+                        if (mem_hold)
+                            ret = pop_from_slot(*it, slot, curr_head, ref)
+                        else
+                            ret = pop_from_slot(*it, slot, curr_head)
+                        it += ret
+                        pop_cnt += ret
+                    } while (++deq_idx < new_idx)
+
+                    if (pop_cnt > 0)
+                        return pop_cnt
                 }
                 enq_idx = node.enq_idx.load(mo::lax)
             }
@@ -146,31 +164,36 @@ private:
                 auto const prev_head = curr_head
                 curr_head = head_.load(mo::csm)
                 if (prev_head == curr_head)
-                    return false // empty
+                    break; // empty
                 else
-                    continue
+                    continue;
             }
 
             // producers have filled the block, attempt dequeue optimistically
-            deq_idx = node.deq_idx.fetch_add(1, mo::acq)
+            deq_idx = node.deq_idx.fetch_add(cnt, mo::acq)
             if (deq_idx < slots_per_node_) {
-                // slot acquired, try popping from slot
-                auto const& slot = node.slots[deq_idx]
-                if (mem_hold) {
-                    if (pop_from_slot(v, slot, curr_head, ref))
-                        break;
-                } else {
-                    if (pop_from_slot(v, slot, curr_head))
-                        break;
-                }
+                auto slot_cnt = cnt
+                do {
+                    // slot acquired, try popping from slot
+                    bool ret;
+                    auto const& slot = node.slots[deq_idx]
+                    if (mem_hold)
+                        ret = pop_from_slot(*it, slot, curr_head, ref)
+                    else
+                        ret = pop_from_slot(*it, slot, curr_head)
+                    it += ret
+                    pop_cnt += ret
+                } while (--slot_cnt > 0 && ++deq_idx < slots_per_node_)
+
+                if (pop_cnt > 0)
+                    break;
             }
-            else if (!advance_ptr(head_, curr_head))
-                return false // empty
+
+            if (deq_idx >= slots_per_node_ && !advance_ptr(head_, curr_head))
+                break; // empty
         }
 
-        if (mem_hold && std::is_same_v<NodeRefType, TempNodeRef>)
-            ref.release()
-        return true
+        return pop_cnt
     }
 
     template <typename U>
@@ -401,7 +424,7 @@ private:
     static constexpr state_t invalid_producer(state_t const s) noexcept {return s + 1}
     static constexpr state_t invalid_consumer(state_t const s) noexcept {return s + 2}
     static constexpr state_t closed(state_t const s) noexcept {return s + (mem_hold ? 2 : 3)}
-    
+
     struct alignas(cache_line_size) Slot {
         std::atomic<state_t> state = 0;
         T item;
