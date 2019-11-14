@@ -18,16 +18,14 @@ namespace mo {
 }
 
 template <typename T, bool mem_hold=false> class MPMCQueue {
-    static constexpr size_t max_queue_capacity = std::numeric_limits<size_t>::max() - 1; 
-    static constexpr size_t max_node_capacity = std::numeric_limits<size_t>::max() / 2;
 public:
     explicit MPMCQueue(
         size_t queue_capacity,
         size_t const node_capacity)
-        : slots_per_node_(std::max(std::min(node_capacity, max_node_capacity), 1)) {
+        : slots_per_node_(std::max(node_capacity, 1)) {
 
-        queue_capacity = std::min(queue_capacity, max_queue_capacity)
-        size_t const num_nodes = std::max((queue_capacity + 1) / slots_per_node_, 2);
+        queue_capacity = std::min(queue_capacity, std::numeric_limits<size_t>::max() - 1)
+        auto const num_nodes = std::max((queue_capacity + 1) / slots_per_node_, 2);
     }
 
     ~MPMCQueue() noexcept {
@@ -157,7 +155,7 @@ private:
             deq_idx = 0;
             enq_idx = node.enq_idx.load(mo::lax);
             while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
-                size_t const new_idx = deq_idx + std::min(cnt, enq_idx - deq_idx);
+                auto const new_idx = deq_idx + std::min(cnt, enq_idx - deq_idx);
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
                         // slot acquired, try popping from slot
@@ -466,7 +464,7 @@ private:
         }
 
         // head_, tail_, back_ = 3 pointers = 3 references
-        constexpr size_t num_refs() const noexcept {return mem_hold ? num_slots + 3 : 3;}
+        constexpr auto num_refs() const noexcept {return mem_hold ? num_slots + 3 : 3;}
 
         size_t const num_slots;
         Slot* slots;
