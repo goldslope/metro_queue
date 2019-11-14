@@ -8,9 +8,26 @@
 
 namespace goldslope {
 
+using std::size_t;
+
+namespace mo {
+    constexpr auto lax = std::memory_order_relaxed
+    constexpr auto csm = std::memory_order_acquire // consume = acquire, for now
+    constexpr auto acq = std::memory_order_acquire
+    constexpr auto rls = std::memory_order_release
+}
+
 template <typename T, bool mem_hold=false> class MPMCQueue {
+    static constexpr size_t max_queue_capacity = std::numeric_limits<size_t>::max() - 1; 
+    static constexpr size_t max_node_capacity = std::numeric_limits<size_t>::max() / 2;
 public:
-    explicit MPMCQueue(size_t const capacity) {
+    explicit MPMCQueue(
+        size_t queue_capacity,
+        size_t const node_capacity)
+        : slots_per_node_(std::max(std::min(node_capacity, max_node_capacity), 1)) {
+
+        queue_capacity = std::min(queue_capacity, max_queue_capacity)
+        size_t const num_nodes = std::max((queue_capacity + 1) / slots_per_node_, 2);
     }
 
     ~MPMCQueue() noexcept {
@@ -140,7 +157,7 @@ private:
             deq_idx = 0;
             enq_idx = node.enq_idx.load(mo::lax);
             while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
-                auto const new_idx = deq_idx + std::min(cnt, enq_idx - deq_idx);
+                size_t const new_idx = deq_idx + std::min(cnt, enq_idx - deq_idx);
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
                         // slot acquired, try popping from slot
@@ -356,7 +373,7 @@ private:
                 }
             }
             std::atomic_thread_fence(mo::acq); // synchronize with all releases
-            freelist_.push(idx);
+            free_list_.push(idx);
         }
     }
 
@@ -380,13 +397,13 @@ private:
             return true;
 
         // no more nodes in the queue, attempt to allocate
-        auto const alloc_idx = freelist_.try_pop(curr_tail);
+        auto const alloc_idx = free_list_.try_pop(curr_tail);
         if (curr_tail.idx == null_idx) {
             curr_tail = tail_.load(mo::csm);
             return true;
         }
         else if (alloc_idx == null_idx)
-            return false; // freelist is empty
+            return false; // free-list is empty
 
         // allocation succeeded, prepare new node to be added
         auto& alloc_node = nodes_[alloc_idx];
@@ -416,8 +433,8 @@ private:
     }
 
 private:
-    static constexpr size_t cache_line_size = 128;
-    static constexpr index_t null_idx = 0xFFFFFFFF;
+    static constexpr auto cache_line_size = 128;
+    static constexpr auto null_idx = std::numeric_limits<index_t>::max();
 
     static constexpr state_t open(state_t const s) noexcept {return s;}
     static constexpr state_t pushed(state_t const s) noexcept {return s + 2;}
@@ -498,6 +515,7 @@ private:
 
 private:
     size_t const slots_per_node_;
+    alignas(cache_line_size) free_list_;
     alignas(cache_line_size) std::atomic<TaggedPtr> head_;
     alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
     alignas(cache_line_size) std::atomic<TaggedPtr> back_;
