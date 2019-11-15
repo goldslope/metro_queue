@@ -18,18 +18,37 @@ namespace mo {
 }
 
 template <typename T, bool mem_hold=false> class MPMCQueue {
+    static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
+        auto const max_a = std::numeric_limits<size_t>::max()
+        auto const round_a = std::min(a, max_a - b + 1) + b - 1;
+        return round_a / b
+    }
 public:
-    explicit MPMCQueue(
-        size_t queue_capacity,
-        size_t const node_capacity)
-        : slots_per_node_(std::max(node_capacity, 1)) {
+    explicit MPMCQueue(size_t queue_capacity, size_t node_capacity) {
+        node_capacity = std::max(node_capacity, 1);
 
-        queue_capacity = std::min(queue_capacity, std::numeric_limits<size_t>::max() - 1)
-        auto const num_nodes = std::max((queue_capacity + 1) / slots_per_node_, 2);
+        // determine number of nodes
+        auto num_nodes = round_divide(queue_capacity, node_capacity)
+        num_nodes = std::min(num_nodes, std::numeric_limits<index_t>::max());
+        num_nodes = std::max(num_nodes, 2);
+
+        // determine slots per node
+        slots_per_node_ = std::max(node_capacity, round_divide(queue_capacity, num_nodes))
+
+        // setup free-list
+        nodes_ = new Node[num_nodes];
+        nodes_[0].init()
+        for (size_t i = 1; i < num_nodes; ++i) {
+            nodes_[i].init();
+            nodes_[i].free_next_ = i - 1;
+        }
+        free_list.head = {num_nodes - 1}
+
+        // setup queue
+        // TODO: stuff here
     }
 
-    ~MPMCQueue() noexcept {
-    }
+    ~MPMCQueue() noexcept {delete[] nodes_}
 
     // non-copyable and non-movable
     MPMCQueue(MPMCQueue const&) = delete;
@@ -63,15 +82,15 @@ public:
 public:
     class NodeRef {
     public:
-        explicit NodeRef(std::shared_ptr<MPMCQueue<T, true>> q) :
+        explicit NodeRef(std::shared_ptr<MPMCQueue<T, true>> q) noexcept :
             queue(q), idx(null_idx), cnt(0) {}
-        ~NodeRef() {release();}
+        ~NodeRef() noexcept {release();}
 
         // non-copyable and non-movable
         NodeRef(NodeRef const&) = delete;
         NodeRef& operator=(NodeRef const&) = delete;
 
-        release() {
+        release() noexcept {
             if (cnt > 0 && idx != null_idx) {
                 queue->remove_node_reference(idx, cnt);
                 cnt = 0;
@@ -86,10 +105,10 @@ public:
 private:
     class TempNodeRef {
     public:
-        TempNodeRef(MPMCQueue* q) : queue(q), idx(null_idx), cnt(0) {}
-        ~TempNodeRef() {release();}
+        TempNodeRef(MPMCQueue* q) noexcept : queue(q), idx(null_idx), cnt(0) {}
+        ~TempNodeRef() noexcept {release();}
 
-        release() {
+        release() noexcept {
             if (memhold && cnt > 0 && idx != null_idx) {
                 queue->remove_node_reference(idx, cnt);
                 cnt = 0;
@@ -451,11 +470,14 @@ private:
     };
 
     struct Node {
-        explicit Node(size_t const capacity) :
-            num_slots(capacity), slots(new Slot[num_slots]), ref_cnt(num_refs()) {}
+        void init (size_t const capacity) noexcept {
+            num_slots = capacity
+            slots = new Slot[num_slots]
+            ref_cnt = num_refs
+        }
         ~Node() {delete[] slots;}
 
-        void reset noexcept() {
+        void reset () noexcept {
             state = closed(state);
             ref_count.store(num_refs(), mo::lax);
             enq_idx.store(0, mo::rls); // release to synchronize with producers
@@ -466,8 +488,8 @@ private:
         // head_, tail_, back_ = 3 pointers = 3 references
         constexpr auto num_refs() const noexcept {return mem_hold ? num_slots + 3 : 3;}
 
-        size_t const num_slots;
-        Slot* slots;
+        size_t num_slots;
+        Slot* slots = std::nullptr;
         state = 0;
 
         // atomics
@@ -513,6 +535,7 @@ private:
 
 private:
     size_t const slots_per_node_;
+    Node* nodes_;
     alignas(cache_line_size) free_list_;
     alignas(cache_line_size) std::atomic<TaggedPtr> head_;
     alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
