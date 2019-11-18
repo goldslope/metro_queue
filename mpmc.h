@@ -45,7 +45,10 @@ public:
         free_list.head = {num_nodes - 1}
 
         // setup queue
-        // TODO: stuff here
+        auto const init_node_idx = free_list_.try_pop(Node())
+        head_ = {init_node_idx, 0};
+        tail_ = {init_node_idx, 0};
+        back_ = {init_node_idx, 0};
     }
 
     ~MPMCQueue() noexcept {delete[] nodes_}
@@ -473,7 +476,7 @@ private:
         void init (size_t const capacity) noexcept {
             num_slots = capacity
             slots = new Slot[num_slots]
-            ref_cnt = num_refs
+            ref_cnt = num_refs()
         }
         ~Node() {delete[] slots;}
 
@@ -488,8 +491,8 @@ private:
         // head_, tail_, back_ = 3 pointers = 3 references
         constexpr auto num_refs() const noexcept {return mem_hold ? num_slots + 3 : 3;}
 
-        size_t num_slots;
-        Slot* slots = std::nullptr;
+        size_t num_slots; // constant after init()
+        Slot* slots = nullptr; // constant after init()
         state = 0;
 
         // atomics
@@ -534,8 +537,8 @@ private:
     };
 
 private:
-    size_t const slots_per_node_;
-    Node* nodes_;
+    size_t slots_per_node_; // constant after construction
+    Node* nodes_; // constant after construction
     alignas(cache_line_size) free_list_;
     alignas(cache_line_size) std::atomic<TaggedPtr> head_;
     alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
