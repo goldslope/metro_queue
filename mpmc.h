@@ -138,15 +138,15 @@ private:
                 auto slot_cnt = cnt;
                 do {
                     // slot acquired, try pushing to slot
-                    bool ret;
+                    bool pushed;
                     auto const& slot = node.slots[enq_idx];
                     std::conditional_t<move, T&&, T const&> v = move ? std::move(*it) : *it;
                     if (mem_hold)
-                        ret = push_to_slot(v, slot, curr_tail, ref);
+                        pushed = push_to_slot(v, slot, curr_tail, ref);
                     else
-                        ret = push_to_slot(v, slot, curr_tail);
-                    it += ret;
-                    push_cnt += ret;
+                        pushed = push_to_slot(v, slot, curr_tail);
+                    it += pushed;
+                    push_cnt += pushed;
                 } while (--slot_cnt > 0 && ++enq_idx < slots_per_node_);
 
                 if (push_cnt > 0)
@@ -182,14 +182,14 @@ private:
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
                         // slot acquired, try popping from slot
-                        bool ret;
+                        bool popped;
                         auto const& slot = node.slots[deq_idx];
                         if (mem_hold)
-                            ret = pop_from_slot(*it, slot, curr_head, ref);
+                            popped = pop_from_slot(*it, slot, curr_head, ref);
                         else
-                            ret = pop_from_slot(*it, slot, curr_head);
-                        it += ret;
-                        pop_cnt += ret;
+                            popped = pop_from_slot(*it, slot, curr_head);
+                        it += popped;
+                        pop_cnt += popped;
                     } while (++deq_idx < new_idx);
 
                     if (pop_cnt > 0)
@@ -213,14 +213,14 @@ private:
                 auto slot_cnt = cnt;
                 do {
                     // slot acquired, try popping from slot
-                    bool ret;
+                    bool popped;
                     auto const& slot = node.slots[deq_idx];
                     if (mem_hold)
-                        ret = pop_from_slot(*it, slot, curr_head, ref);
+                        popped = pop_from_slot(*it, slot, curr_head, ref);
                     else
-                        ret = pop_from_slot(*it, slot, curr_head);
-                    it += ret;
-                    pop_cnt += ret;
+                        popped = pop_from_slot(*it, slot, curr_head);
+                    it += popped;
+                    pop_cnt += popped;
                 } while (--slot_cnt > 0 && ++deq_idx < slots_per_node_);
 
                 if (pop_cnt > 0)
