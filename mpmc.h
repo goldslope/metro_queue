@@ -29,11 +29,12 @@ public:
 
         // determine number of nodes
         auto num_nodes = round_divide(queue_capacity, node_capacity)
-        num_nodes = std::min(num_nodes, std::numeric_limits<index_t>::max());
+        num_nodes = std::min(num_nodes, null_addr);
         num_nodes = std::max(num_nodes, 2);
 
         // determine slots per node
-        slots_per_node_ = std::max(node_capacity, round_divide(queue_capacity, num_nodes))
+        slots_per_node_ = round_divide(queue_capacity, num_nodes)
+        slots_per_node_ = std::max(slots_per_node_, node_capacity)
 
         // setup free-list
         nodes_ = new Node[num_nodes];
@@ -45,10 +46,10 @@ public:
         free_list.head = {num_nodes - 1}
 
         // setup queue
-        auto const init_node_idx = free_list_.try_pop(Node())
-        head_ = {init_node_idx, 0};
-        tail_ = {init_node_idx, 0};
-        back_ = {init_node_idx, 0};
+        auto const init_addr = free_list_.try_pop(Node())
+        head_ = {init_addr, 0};
+        tail_ = {init_addr, 0};
+        back_ = {init_addr, 0};
     }
 
     ~MPMCQueue() noexcept {delete[] nodes_}
@@ -86,7 +87,7 @@ public:
     class NodeRef {
     public:
         explicit NodeRef(std::shared_ptr<MPMCQueue<T, true>> q) noexcept :
-            queue(q), idx(null_idx), cnt(0) {}
+            queue(q), addr(null_addr), cnt(0) {}
         ~NodeRef() noexcept {release();}
 
         // non-copyable and non-movable
@@ -94,32 +95,32 @@ public:
         NodeRef& operator=(NodeRef const&) = delete;
 
         release() noexcept {
-            if (cnt > 0 && idx != null_idx) {
-                queue->remove_node_reference(idx, cnt);
+            if (cnt > 0 && addr != null_addr) {
+                queue->remove_node_reference(addr, cnt);
                 cnt = 0;
             }
         }
     private:
         std::shared_ptr<MPMCQueue<T, true>> const queue;
-        index_t idx;
+        address_t addr;
         size_t cnt;
     }
 
 private:
     class TempNodeRef {
     public:
-        TempNodeRef(MPMCQueue* q) noexcept : queue(q), idx(null_idx), cnt(0) {}
+        TempNodeRef(MPMCQueue* q) noexcept : queue(q), addr(null_addr), cnt(0) {}
         ~TempNodeRef() noexcept {release();}
 
         release() noexcept {
-            if (memhold && cnt > 0 && idx != null_idx) {
-                queue->remove_node_reference(idx, cnt);
+            if (memhold && cnt > 0 && addr != null_addr) {
+                queue->remove_node_reference(addr, cnt);
                 cnt = 0;
             }
         }
     private:
         MPMCQueue* const queue;
-        index_t idx;
+        address_t addr;
         size_t cnt;
     }
 
@@ -131,7 +132,7 @@ private:
         auto& ref = TempNodeRef(this);
 
         for (;;) {
-            auto& node = nodes_[curr_tail.idx];
+            auto& node = nodes_[curr_tail.addr];
             auto enq_idx = node.enq_idx.fetch_add(cnt, mo::acq);
             if (enq_idx > slots_per_node_) {
                 auto slot_cnt = cnt;
@@ -166,13 +167,13 @@ private:
 
         for (;;) {
             if (mem_hold) {
-                if (ref.idx != curr_head.idx) {
+                if (ref.addr != curr_head.addr) {
                     ref.release();
-                    ref.idx = curr_head.idx;
+                    ref.addr = curr_head.addr;
                 }
             }
 
-            auto& node = nodes_[curr_head.idx];
+            auto& node = nodes_[curr_head.addr];
             size_t deq_idx, enq_idx;
             deq_idx = 0;
             enq_idx = node.enq_idx.load(mo::lax);
@@ -235,8 +236,8 @@ private:
 
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
-        auto const s = nodes_[ptr.idx].state;
-        if (s != ptr.tag) {
+        auto const s = nodes_[ptr.addr].state;
+        if (s != ptr.state) {
             // producer ABA occurred, invalidate slot
             auto const prev_state = slot.state.exchange(invalid_producer(s), mo::rls);
             if (prev_state == invalid_consumer(s)) {
@@ -264,8 +265,8 @@ private:
 
     template <typename U>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
-        auto const s = nodes_[ptr.idx].state;
-        if (s != ptr.tag) {
+        auto const s = nodes_[ptr.addr].state;
+        if (s != ptr.state) {
             // producer ABA occurred, invalidate slot
             auto const prev_state = slot.state.exchange(invalid_producer(s), mo::rls);
             if (prev_state == invalid_consumer(s)) {
@@ -294,8 +295,8 @@ private:
     }
 
     bool pop_from_slot(T& v, Slot& slot, TaggedPtr ptr) noexcept {
-        auto const s = nodes_[ptr.idx].state;
-        if (s != ptr.tag) {
+        auto const s = nodes_[ptr.addr].state;
+        if (s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             auto const prev_state = slot.state.exchange(new_state, mo::rls);
@@ -336,8 +337,8 @@ private:
     }
 
     bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
-        auto const s = nodes_[ptr.idx].state;
-        if (s != ptr.tag) {
+        auto const s = nodes_[ptr.addr].state;
+        if (s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             auto const prev_state = slot.state.exchange(new_state, mo::rls);
@@ -381,8 +382,8 @@ private:
         return true;
     }
 
-    void remove_node_reference(index_t const node_idx, int const rmv_cnt=1) {
-        auto& node = nodes_[idx];
+    void remove_node_reference(address_t const addr, int const rmv_cnt=1) {
+        auto& node = nodes_[addr];
         auto const prev_cnt = node.ref_cnt.fetch_sub(rmv_cnt, mem_hold ? mo::rls : mo::lax);
         if (prev_cnt == rmv_cnt) {
             if (!mem_hold) {
@@ -393,16 +394,16 @@ private:
                 }
             }
             std::atomic_thread_fence(mo::acq); // synchronize with all releases
-            free_list_.push(idx);
+            free_list_.push(addr);
         }
     }
 
     bool advance_ptr(std::atomic<TaggedPtr>& ptr, TaggedPtr& curr_val) {
-        auto const new_val = nodes_[curr_val.idx].next.load(mo::csm);
-        TaggedPtr const null_ptr = {null_idx, curr_val.tag};
+        auto const new_val = nodes_[curr_val.addr].next.load(mo::csm);
+        TaggedPtr const null_ptr = {null_addr, curr_val.state};
         if (new_val != null_ptr) {
             if (ptr.compare_exchange_strong(curr_val, new_val, mo::rls, mo::csm)) {
-                remove_node_reference(curr_val.idx);
+                remove_node_reference(curr_val.addr);
                 curr_val = new_val;
             }
             return true;
@@ -417,26 +418,26 @@ private:
             return true;
 
         // no more nodes in the queue, attempt to allocate
-        auto const alloc_idx = free_list_.try_pop(curr_tail);
-        if (curr_tail.idx == null_idx) {
+        auto const alloc_addr = free_list_.try_pop(curr_tail);
+        if (curr_tail.addr == null_addr) {
             curr_tail = tail_.load(mo::csm);
             return true;
         }
-        else if (alloc_idx == null_idx)
+        else if (alloc_addr == null_addr)
             return false; // free-list is empty
 
         // allocation succeeded, prepare new node to be added
-        auto& alloc_node = nodes_[alloc_idx];
+        auto& alloc_node = nodes_[alloc_addr];
         alloc_node.reset();
 
         // append new node to end of the queue 
-        TaggedPtr alloc_ptr = {alloc_idx, alloc_node.state};
+        TaggedPtr alloc_ptr = {alloc_addr, alloc_node.state};
         auto curr_back = back_.load(mo::csm);
         auto done = false;
         while (!done) {
-            auto& next_ptr = nodes_[curr_back.idx].next;
+            auto& next_ptr = nodes_[curr_back.addr].next;
             auto curr_next = next_ptr.load(mo::csm); 
-            TaggedPtr const null_ptr = {null_idx, curr_back.tag};
+            TaggedPtr const null_ptr = {null_addr, curr_back.state};
             if (curr_next == null_ptr) {
                 if (next_ptr.compare_exchange_strong(curr_next, alloc_ptr, mo::rls, mo::csm)) {
                     curr_next = alloc_ptr;
@@ -444,7 +445,7 @@ private:
                 }
             }
             if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm))
-                remove_node_reference(curr_back.idx);
+                remove_node_reference(curr_back.addr);
         }
 
         // now that new node is added, advance the tail
@@ -454,7 +455,7 @@ private:
 
 private:
     static constexpr auto cache_line_size = 128;
-    static constexpr auto null_idx = std::numeric_limits<index_t>::max();
+    static constexpr auto null_addr = std::numeric_limits<address_t>::max();
 
     static constexpr state_t open(state_t const s) noexcept {return s;}
     static constexpr state_t pushed(state_t const s) noexcept {return s + 2;}
@@ -468,8 +469,8 @@ private:
     };
 
     struct TaggedPtr {
-        index_t idx;
-        state_t tag;
+        address_t addr;
+        state_t state;
     };
 
     struct Node {
@@ -485,7 +486,7 @@ private:
             ref_count.store(num_refs(), mo::lax);
             enq_idx.store(0, mo::rls); // release to synchronize with producers
             deq_idx.store(0, mo::rls); // release to synchronize with consumers
-            next.store({null_idx, state}, mo::lax); // not included in synchronization
+            next.store({null_addr, state}, mo::lax); // not included in synchronization
         }
 
         // head_, tail_, back_ = 3 pointers = 3 references
@@ -496,41 +497,41 @@ private:
         state = 0;
 
         // atomics
-        alignas(cache_line_size) std::atomic<TaggedPtr> next = {null_idx, 0};
-        alignas(cache_line_size) std::atomic<index_t> free_next = null_idx;
+        alignas(cache_line_size) std::atomic<TaggedPtr> next = {null_addr, 0};
+        alignas(cache_line_size) std::atomic<address_t> free_next = null_addr;
         std::atomic<size_t> ref_cnt; // same cacheline as free next
         alignas(cache_line_size) std::atomic<size_t> enq_idx = 0;
         alignas(cache_line_size) std::atomic<size_t> deq_idx = 0;
     };
 
     struct FreeList {
-        void push(index_t const new_idx) {
+        void push(address_t const new_addr) {
             auto curr_head = head.load(mo::lax);
-            TaggedPtr new_head = {new_idx};
+            TaggedPtr new_head = {new_addr};
             do {
-                new_head.tag = curr_head.tag;
-                nodes_[new_idx].free_next.store(curr_head.idx, mo::lax);
+                new_head.state = curr_head.state;
+                nodes_[new_addr].free_next.store(curr_head.addr, mo::lax);
             } while (!head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::lax));
         }
 
-        index_t try_pop(TaggedPtr const& q_tail) {
+        address_t try_pop(TaggedPtr const& q_tail) {
             auto curr_head = head.load(mo::csm);
-            auto const& q_tail_node = nodes_[q_tail.idx];
-            TaggedPtr const null_ptr = {null_idx, q_tail.tag};
+            auto const& q_tail_node = nodes_[q_tail.addr];
+            TaggedPtr const null_ptr = {null_addr, q_tail.state};
             TaggedPtr new_head;
  
             // check for empty list on each loop iteration
-            while (curr_head.idx != null_idx) {
-                new_head.idx = nodes_[curr_head.idx].free_next.load(mo::lax);
-                new_head.tag = curr_head.tag + 1;
+            while (curr_head.addr != null_addr) {
+                new_head.addr = nodes_[curr_head.addr].free_next.load(mo::lax);
+                new_head.state = curr_head.state + 1;
                 if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::csm))
                     break; // success!
-                else if (q_tail_node.next.load(mo::lax) != null_ptr) { 
-                    q_tail.idx = null_idx; // indicate allocation is no longer needed
+                else if (q_tail_node.next.load(mo::lax) != null_ptr) {
+                    q_tail.addr = null_addr; // indicate allocation is no longer needed
                     break;
                 }
             }
-            return curr_head.idx;
+            return curr_head.addr;
         }
 
         std::atomic<TaggedPtr> head;
