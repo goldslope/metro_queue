@@ -11,17 +11,17 @@ namespace goldslope {
 using std::size_t;
 
 namespace mo {
-    constexpr auto lax = std::memory_order_relaxed
-    constexpr auto csm = std::memory_order_acquire // consume = acquire, for now
-    constexpr auto acq = std::memory_order_acquire
-    constexpr auto rls = std::memory_order_release
+    constexpr auto lax = std::memory_order_relaxed;
+    constexpr auto csm = std::memory_order_acquire; // consume = acquire, for now
+    constexpr auto acq = std::memory_order_acquire;
+    constexpr auto rls = std::memory_order_release;
 }
 
 template <typename T, bool mem_hold=false> class MPMCQueue {
     static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
-        auto const max_a = std::numeric_limits<size_t>::max()
+        auto const max_a = std::numeric_limits<size_t>::max();
         auto const round_a = std::min(a, max_a - b + 1) + b - 1;
-        return round_a / b
+        return round_a / b;
     }
 public:
     explicit MPMCQueue(size_t queue_capacity, size_t node_capacity) {
@@ -33,26 +33,26 @@ public:
         num_nodes = std::max(num_nodes, 2);
 
         // determine slots per node
-        slots_per_node_ = round_divide(queue_capacity, num_nodes)
-        slots_per_node_ = std::max(slots_per_node_, node_capacity)
+        slots_per_node_ = round_divide(queue_capacity, num_nodes);
+        slots_per_node_ = std::max(slots_per_node_, node_capacity);
 
         // setup free-list
         nodes_ = new Node[num_nodes];
-        nodes_[0].init()
+        nodes_[0].init();
         for (size_t i = 1; i < num_nodes; ++i) {
             nodes_[i].init();
             nodes_[i].free_next_ = i - 1;
         }
-        free_list.head = {num_nodes - 1}
+        free_list.head = {num_nodes - 1};
 
         // setup queue
-        auto const init_addr = free_list_.try_pop(Node())
+        auto const init_addr = free_list_.try_pop(Node());
         head_ = {init_addr, 0};
         tail_ = {init_addr, 0};
         back_ = {init_addr, 0};
     }
 
-    ~MPMCQueue() noexcept {delete[] nodes_}
+    ~MPMCQueue() noexcept {delete[] nodes_;}
 
     // non-copyable and non-movable
     MPMCQueue(MPMCQueue const&) = delete;
