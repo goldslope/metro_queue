@@ -17,14 +17,113 @@ namespace mo {
     constexpr auto rls = std::memory_order_release;
 }
 
+
+template <typename T, bool mem_hold=false> class MPMCQueuePtr {
+
+    // non-movable
+    MPMCQueuePtr(MPMCQueuePtr&&) = delete;
+    MPMCQueuePtr& operator =(MPMCQueuePtr&&) = delete;
+
+    // disable addressing and heap allocation
+    MPMCQueuePtr* operator &() = delete;
+    void* operator new(size_t) = delete;
+    void* operator new(size_t, std::align_val_t) = delete;
+    void operator delete(void*) = delete;
+    void operator delete(void*, std::align_val_t) = delete;
+
+    std::shared_ptr<MPMCQueue> const queue;
+}
+
 template <typename T, bool mem_hold=false> class MPMCQueue {
+public:
+    // TODO: enforce iterator traits
+    // random_access_tag
+    // reference is an actual reference
+
+    bool try_push(T const& v) noexcept {
+        return try_push(&v, 1);
+    }
+
+    bool try_push(T&& v) noexcept {
+        return try_push<move = true>(&v, 1);
+    }
+
+    bool try_pop(T& v) noexcept {
+        return try_pop(&v, 1, TempNodeRef(this));
+    }
+
+    bool try_pop(T& v, NodeRef& ref) noexcept {
+        static_assert(mem_hold == true);
+
+        if (ref.queue.get() != this)
+            return try_pop(&v, 1, TempNodeRef(this));
+
+        return try_pop(&v, 1, ref);
+    }
+
+    class NodeRef {
+    public:
+        explicit NodeRef(MPMCQueuePtr<T, true> q) noexcept :
+            queue(q), addr(null_addr), cnt(0) {}
+        ~NodeRef() noexcept {release();}
+
+        release() noexcept {
+            if (cnt > 0 && addr != null_addr) {
+                queue->remove_node_reference(addr, cnt);
+                cnt = 0;
+            }
+        }
+
+        // non-copyable and non-movable
+        NodeRef(NodeRef const&) = delete;
+        NodeRef& operator=(NodeRef const&) = delete;
+
+        // disable addressing and heap allocation
+        NodeRef* operator &() = delete;
+        void* operator new(size_t) = delete;
+        void* operator new(size_t, std::align_val_t) = delete;
+        void operator delete(void*) = delete;
+        void operator delete(void*, std::align_val_t) = delete;
+
+    private:
+        MPMCQueuePtr<T, true> const queue;
+        address_t addr;
+        size_t cnt;
+    }
+
+private:
+    struct TempNodeRef {
+        TempNodeRef(MPMCQueue* q) noexcept : queue(q), addr(null_addr), cnt(0) {}
+        ~TempNodeRef() noexcept {release();}
+
+        release() noexcept {
+            if (memhold && cnt > 0 && addr != null_addr) {
+                queue->remove_node_reference(addr, cnt);
+                cnt = 0;
+            }
+        }
+
+        MPMCQueue* const queue;
+        address_t addr;
+        size_t cnt;
+    };
+
+private:
+    static constexpr auto cache_line_size = 128;
+    static constexpr auto null_addr = std::numeric_limits<address_t>::max();
     static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
         auto const max_a = std::numeric_limits<size_t>::max();
         auto const round_a = std::min(a, max_a - b + 1) + b - 1;
         return round_a / b;
     }
-public:
-    explicit MPMCQueue(size_t queue_capacity, size_t node_capacity) {
+    static constexpr state_t open(state_t const s) noexcept {return s;}
+    static constexpr state_t pushed(state_t const s) noexcept {return s + 2;}
+    static constexpr state_t invalid_producer(state_t const s) noexcept {return s + 1;}
+    static constexpr state_t invalid_consumer(state_t const s) noexcept {return s + 2;}
+    static constexpr state_t closed(state_t const s) noexcept {return s + (mem_hold ? 2 : 3);}
+
+    // private constructor
+    MPMCQueue(size_t queue_capacity, size_t node_capacity) {
         node_capacity = std::max(node_capacity, 1);
 
         // determine number of nodes
@@ -52,79 +151,12 @@ public:
         back_ = {init_addr, 0};
     }
 
+    // private destructor
     ~MPMCQueue() noexcept {delete[] nodes_;}
 
-    // non-copyable and non-movable
+    // disable copy-construction
     MPMCQueue(MPMCQueue const&) = delete;
-    MPMCQueue& operator=(MPMCQueue const&) = delete;
 
-    // TODO: enforce iterator traits
-    // random_access_tag
-    // reference is an actual reference
-
-    bool try_push(T const& v) noexcept {
-        return try_push(&v, 1);
-    }
-
-    bool try_push(T&& v) noexcept {
-        return try_push<move = true>(&v, 1);
-    }
-
-    bool try_pop(T& v) noexcept {
-        return try_pop(&v, 1, TempNodeRef(this));
-    }
-
-    bool try_pop(T& v, NodeRef& ref) noexcept {
-        static_assert(mem_hold == true);
-
-        if (ref.queue.get() != this)
-            return try_pop(&v, 1, TempNodeRef(this));
-
-        return try_pop(&v, 1, ref);
-    }
-
-public:
-    class NodeRef {
-    public:
-        explicit NodeRef(std::shared_ptr<MPMCQueue<T, true>> q) noexcept :
-            queue(q), addr(null_addr), cnt(0) {}
-        ~NodeRef() noexcept {release();}
-
-        // non-copyable and non-movable
-        NodeRef(NodeRef const&) = delete;
-        NodeRef& operator=(NodeRef const&) = delete;
-
-        release() noexcept {
-            if (cnt > 0 && addr != null_addr) {
-                queue->remove_node_reference(addr, cnt);
-                cnt = 0;
-            }
-        }
-    private:
-        std::shared_ptr<MPMCQueue<T, true>> const queue;
-        address_t addr;
-        size_t cnt;
-    }
-
-private:
-    class TempNodeRef {
-    public:
-        TempNodeRef(MPMCQueue* q) noexcept : queue(q), addr(null_addr), cnt(0) {}
-        ~TempNodeRef() noexcept {release();}
-
-        release() noexcept {
-            if (memhold && cnt > 0 && addr != null_addr) {
-                queue->remove_node_reference(addr, cnt);
-                cnt = 0;
-            }
-        }
-    private:
-        MPMCQueue* const queue;
-        address_t addr;
-        size_t cnt;
-    }
-
-private:
     template <typename Iter, bool move=false>
     size_t try_push(Iter it, size_t const cnt) noexcept(std::is_pointer_v(Iter)) {
         size_t push_cnt = 0;
@@ -453,16 +485,6 @@ private:
         return true;
     }
 
-private:
-    static constexpr auto cache_line_size = 128;
-    static constexpr auto null_addr = std::numeric_limits<address_t>::max();
-
-    static constexpr state_t open(state_t const s) noexcept {return s;}
-    static constexpr state_t pushed(state_t const s) noexcept {return s + 2;}
-    static constexpr state_t invalid_producer(state_t const s) noexcept {return s + 1;}
-    static constexpr state_t invalid_consumer(state_t const s) noexcept {return s + 2;}
-    static constexpr state_t closed(state_t const s) noexcept {return s + (mem_hold ? 2 : 3);}
-
     struct alignas(cache_line_size) Slot {
         std::atomic<state_t> state = 0;
         T item;
@@ -537,7 +559,6 @@ private:
         std::atomic<TaggedPtr> head;
     };
 
-private:
     size_t slots_per_node_; // constant after construction
     Node* nodes_; // constant after construction
     alignas(cache_line_size) free_list_;
