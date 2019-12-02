@@ -6,9 +6,11 @@ namespace goldslope {
 
 using std::size_t;
 
-template <typename T, auto node_ref_enabled=MPMCQueue::NodeRef::enabled>
+template <typename T,
+          auto node_ref_usage=MPMCQueue::NodeRef::disabled,
+          auto progress_guarantee=MPMCQueue::ProgressGuarantee::blocking>
 class MPMCQueuePtr {
-    typedef MPMCQueue<T, node_ref_enabled>> queue_t;
+    typedef MPMCQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
 
 public:
     MPMCQueuePtr(size_t queue_capacity, size_t node_capacity) :
@@ -43,7 +45,7 @@ private:
     friend class MPMCQueue;
 };
 
-template <typename T, bool node_ref_ok>
+template <typename T, bool node_ref_ok, bool obstruction_free>
 class MPMCQueue {
 public:
     class NodeRef {
@@ -78,6 +80,8 @@ public:
 
         friend class MPMCQueue;
     };
+
+    enum class : bool ProgressGuarantee {obstruction_free = true, blocking = false}
 
 private:
     template <bool enabled>
@@ -408,7 +412,7 @@ private:
 
     bool pop_from_slot(T& v, Slot& slot, TaggedPtr ptr) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if (s != ptr.state) {
+        if (obstruction_free || s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             auto const prev_state = slot.state.exchange(new_state, mo::rls);
@@ -450,7 +454,7 @@ private:
 
     bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if (s != ptr.state) {
+        if (obstruction_free || s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             auto const prev_state = slot.state.exchange(new_state, mo::rls);
