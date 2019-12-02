@@ -2,27 +2,25 @@
 
 #include <atomic>
 
-namespace goldslope {
-
 using std::size_t;
 
 template <typename T,
-          auto node_ref_usage=MPMCQueue::NodeRef::disabled,
-          auto progress_guarantee=MPMCQueue::ProgressGuarantee::blocking>
-class MPMCQueuePtr {
-    typedef MPMCQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
+          auto node_ref_usage=MetroQueue::NodeRef::disabled,
+          auto progress_guarantee=MetroQueue::ProgressGuarantee::blocking>
+class MetroQueuePtr {
+    typedef MetroQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
 
 public:
-    MPMCQueuePtr(size_t queue_capacity, size_t node_capacity) :
-        q_ptr(make_shared<queue_t>(MPMCQueue::Key{0}, queue_capacity, node_capacity)) {}
+    MetroQueuePtr(size_t queue_capacity, size_t node_capacity) :
+        q_ptr(make_shared<queue_t>(MetroQueue::Key{0}, queue_capacity, node_capacity)) {}
 
     std::shared_ptr<queue_t>& operator->() const noexcept {return q_ptr;}
 
-    bool operator==(MPMCQueuePtr& const other) const noexcept {
+    bool operator==(MetroQueuePtr& const other) const noexcept {
         return q_ptr == other.q_ptr;
     }
 
-    bool operator!=(MPMCQueuePtr& const other) const noexcept {
+    bool operator!=(MetroQueuePtr& const other) const noexcept {
         return q_ptr != other.q_ptr;
     }
 
@@ -30,11 +28,11 @@ private:
     queue_t* const get() const noexcept {return q_ptr.get();}
 
     // non-movable
-    MPMCQueuePtr(MPMCQueuePtr&&) = delete;
-    MPMCQueuePtr& operator=(MPMCQueuePtr&&) = delete;
+    MetroQueuePtr(MetroQueuePtr&&) = delete;
+    MetroQueuePtr& operator=(MetroQueuePtr&&) = delete;
 
     // disable addressing and heap allocation
-    MPMCQueuePtr* operator&() = delete;
+    MetroQueuePtr* operator&() = delete;
     void* operator new(size_t) = delete;
     void* operator new(size_t, std::align_val_t) = delete;
     void operator delete(void*) = delete;
@@ -42,17 +40,17 @@ private:
 
     std::shared_ptr<queue_t> const q_ptr;
 
-    friend class MPMCQueue;
+    friend class MetroQueue;
 };
 
 template <typename T, bool node_ref_ok, bool obstruction_free>
-class MPMCQueue {
+class MetroQueue {
 public:
     class NodeRef {
     public:
         enum : bool enabled_or_disabled {enabled = true, disabled = false};
 
-        explicit NodeRef(MPMCQueuePtr<T, true> q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
+        explicit NodeRef(MetroQueuePtr<T, true> q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
         ~NodeRef() {release();}
 
         release() noexcept {
@@ -74,11 +72,11 @@ public:
         void operator delete(void*, std::align_val_t) = delete;
 
     private:
-        MPMCQueuePtr<T, true> const q_ptr;
+        MetroQueuePtr<T, true> const q_ptr;
         address_t addr;
         size_t cnt;
 
-        friend class MPMCQueue;
+        friend class MetroQueue;
     };
 
     enum class : bool ProgressGuarantee {obstruction_free = true, blocking = false}
@@ -86,7 +84,7 @@ public:
 private:
     template <bool enabled>
     struct TmpNodeRef {
-        explicit TmpNodeRef(MPMCQueue* q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
+        explicit TmpNodeRef(MetroQueue* q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
         ~TmpNodeRef() {release();}
 
         release() noexcept {
@@ -96,7 +94,7 @@ private:
             }
         }
 
-        MPMCQueue* const q_ptr;
+        MetroQueue* const q_ptr;
         address_t addr;
         size_t cnt;
     };
@@ -116,7 +114,7 @@ private:
     };
 
 public:
-    MPMCQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key>& const,
+    MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key>& const,
               size_t queue_capacity,
               size_t node_capacity) {
 
@@ -147,8 +145,8 @@ public:
         back_ = {init_addr, 0};
     }
 
-    MPMCQueue() = delete;
-    ~MPMCQueue() {delete[] nodes_;}
+    MetroQueue() = delete;
+    ~MetroQueue() {delete[] nodes_;}
 
 private:
     template <typename U>
@@ -538,8 +536,7 @@ private:
         if (curr_tail.addr == null_addr) {
             curr_tail = tail_.load(mo::csm);
             return true;
-        }
-        else if (alloc_addr == null_addr)
+        } else if (alloc_addr == null_addr)
             return false; // free-list is empty
 
         // allocation succeeded, prepare new node to be added
@@ -650,5 +647,5 @@ private:
     alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
     alignas(cache_line_size) std::atomic<TaggedPtr> back_;
 
-    friend MPMCQueuePtr::MPMCQueuePtr(size_t, size_t);
+    friend MetroQueuePtr::MetroQueuePtr(size_t, size_t);
 };
