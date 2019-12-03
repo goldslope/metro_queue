@@ -16,13 +16,9 @@ public:
 
     std::shared_ptr<queue_t>& operator->() const noexcept {return q_ptr;}
 
-    bool operator==(MetroQueuePtr& const other) const noexcept {
-        return q_ptr == other.q_ptr;
-    }
-
-    bool operator!=(MetroQueuePtr& const other) const noexcept {
-        return q_ptr != other.q_ptr;
-    }
+    void swap(MetroQueuePtr& other) {q_ptr.swap(other);}
+    bool operator==(MetroQueuePtr& const other) const noexcept {return q_ptr == other.q_ptr;}
+    bool operator!=(MetroQueuePtr& const other) const noexcept {return q_ptr != other.q_ptr;}
 
 private:
     queue_t* const get() const noexcept {return q_ptr.get();}
