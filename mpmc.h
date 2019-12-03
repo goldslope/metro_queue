@@ -115,8 +115,8 @@ private:
 
 public:
     MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key>& const,
-              size_t queue_capacity,
-              size_t node_capacity) {
+               size_t queue_capacity,
+               size_t node_capacity) {
 
         node_capacity = std::max(node_capacity, 1);
 
@@ -152,7 +152,7 @@ private:
     template <typename U>
     static constexpr auto is_valid_push_value =
         is_same_v<std::remove_reference_t<U>, T> &&
-        (is_rvalue_reference_v<U&&> || is_nothrow_copy_assignable_v<T>)
+        is_nothrow_assignable_v<T, U>
 
     template <typename Iter>
     static constexpr auto is_valid_base_iterator =
@@ -162,7 +162,7 @@ private:
     template <typename Iter>
     static constexpr auto is_valid_push_iterator =
         is_valid_base_iterator<Iter> &&
-        (is_rvalue_reference_v<std::iterator_traits<Iter>::reference> || is_nothrow_copy_assignable_v<T>)
+        is_nothrow_assignable_v<T, std::iterator_traits<Iter>::reference>
 
     template <typename Iter>
     static constexpr auto is_valid_pop_iterator =
@@ -181,8 +181,9 @@ public:
 
     template <typename = std::enable_if_t<node_ref_ok>>
     bool try_pop(T& v, NodeRef& ref) noexcept {
-        if (ref.q_ptr.get() != this)
+        if (ref.q_ptr.get() != this) {
             return try_pop(v, 1, TmpNodeRef<node_ref_ok>{this});
+        }
 
         return try_pop(v, 1, ref);
     }
@@ -191,8 +192,9 @@ public:
               typename = std::enable_if_t<is_valid_push_iterator<Iter>>>
     size_t try_push(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
-        if (item_cnt > 0)
+        if (item_cnt > 0) {
             return try_push(begin, item_cnt);
+        }
 
         return 0;
     }
@@ -201,19 +203,21 @@ public:
               typename = std::enable_if_t<is_valid_pop_iterator<Iter>>>
     size_t try_pop(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
-        if (item_cnt > 0)
+        if (item_cnt > 0) {
             return try_pop(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
+        }
 
         return 0;
     }
 
     template <typename Iter,
               typename = std::enable_if_t<is_valid_pop_iterator<Iter> && node_ref_ok>>
-    size_t try_pop(Iter begin, Iter end) noexcept {
+    size_t try_pop(Iter begin, Iter end, NodeRef& ref) noexcept {
         auto const item_cnt = end - begin;
         if (item_cnt > 0) {
-            if (ref.q_ptr.get() != this)
+            if (ref.q_ptr.get() != this) {
                 return try_pop(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
+            }
 
             return try_pop(begin, item_cnt, ref);
         }
@@ -257,20 +261,23 @@ private:
                     // slot acquired, try pushing to slot
                     bool pushed;
                     auto const& slot = node.slots[enq_idx];
-                    if (node_ref_ok)
+                    if (node_ref_ok) {
                         pushed = push_to_slot(*it, slot, curr_tail, ref);
-                    else
+                    } else {
                         pushed = push_to_slot(*it, slot, curr_tail);
+                    }
                     it += pushed;
                     push_cnt += pushed;
                 } while (--slot_cnt > 0 && ++enq_idx < slots_per_node_);
 
-                if (push_cnt > 0)
+                if (push_cnt > 0) {
                     break;
+                }
             }
 
-            if (enq_idx >= slots_per_node_ && !get_next_tail(curr_tail))
+            if (enq_idx >= slots_per_node_ && !get_next_tail(curr_tail)) {
                 break; // full
+            }
         }
 
         return push_cnt;
@@ -298,16 +305,18 @@ private:
                         // slot acquired, try popping from slot
                         bool popped;
                         auto const& slot = node.slots[deq_idx];
-                        if (node_ref_ok)
+                        if (node_ref_ok) {
                             popped = pop_from_slot(*it, slot, curr_head, ref);
-                        else
+                        } else {
                             popped = pop_from_slot(*it, slot, curr_head);
+                        }
                         it += popped;
                         pop_cnt += popped;
                     } while (++deq_idx < new_idx);
 
-                    if (pop_cnt > 0)
+                    if (pop_cnt > 0) {
                         return pop_cnt;
+                    }
                 }
                 enq_idx = node.enq_idx.load(mo::lax);
             }
@@ -315,10 +324,11 @@ private:
             if (deq_idx >= enq_idx) {
                 auto const prev_head = curr_head;
                 curr_head = head_.load(mo::csm);
-                if (prev_head == curr_head)
+                if (prev_head == curr_head) {
                     break; // empty
-                else
+                } else {
                     continue;
+                }
             }
 
             // producers have filled the block, attempt dequeue optimistically
@@ -329,170 +339,95 @@ private:
                     // slot acquired, try popping from slot
                     bool popped;
                     auto const& slot = node.slots[deq_idx];
-                    if (node_ref_ok)
+                    if (node_ref_ok) {
                         popped = pop_from_slot(*it, slot, curr_head, ref);
-                    else
+                    } else {
                         popped = pop_from_slot(*it, slot, curr_head);
+                    }
                     it += popped;
                     pop_cnt += popped;
                 } while (--slot_cnt > 0 && ++deq_idx < slots_per_node_);
 
-                if (pop_cnt > 0)
+                if (pop_cnt > 0) {
                     break;
+                }
             }
 
-            if (deq_idx >= slots_per_node_ && !advance_ptr(head_, curr_head))
+            if (deq_idx >= slots_per_node_ && !advance_ptr(head_, curr_head)) {
                 break; // empty
+            }
         }
 
         return pop_cnt;
     }
 
     template <typename U>
-    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr) noexcept {
+    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
+        auto curr_state = open(s);
         if (s != ptr.state) {
-            // producer ABA occurred, invalidate slot
-            auto const prev_state = slot.state.exchange(invalid_producer(s), mo::rls);
-            if (prev_state == invalid_consumer(s)) {
-                // consumer ABA occurred first, close slot
-                std::atomic_thread_fence(mo::acq);
-                slot.state.store(closed(s), mo::rls);
+            // producer ABA occurred, attempt to invalidate slot
+            auto const new_state = invalid_producer(s);
+            if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+                return false; // slot invalidated
             }
-            return false;
+        } else {
+            // everything looks good, attempt to write
+            slot.item = std::forward<U>(v);
+            auto const new_state = pushed(s);
+            if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+                return true; // success!
+            }
+
+            // consumer ABA occurred, recover item
+            v = std::move(slot.item);
         }
 
-        // everything looks good, attempt to write
-        slot.item = std::forward<U>(v);
-        auto const new_state = pushed(s);
-        auto const prev_state = slot.state.exchange(new_state, mo::rls);
-        if (prev_state == open(s)) 
-            return true; // success!
-
-        // consumer ABA occurred first, recover item and close slot 
-        assert(prev_state == invalid_consumer(s));
-        std::atomic_thread_fence(mo::acq);
-        v = std::move(slot.item);
-        slot.state.store(closed(s), mo::rls);
+        // consumer ABA occurred, close slot if needed
+        assert(curr_state == invalid_consumer(s));
+        if (!node_ref_ok) {
+            slot.state.store(closed(s), mo::rls);
+        } else {
+            assert(curr_state == closed(s))
+            ++ref.cnt; // producer owns slot, increment reference count
+        }
         return false;
     }
 
-    template <typename U>
-    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
+    template <typename NodeRefType>
+    bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRefType& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if (s != ptr.state) {
-            // producer ABA occurred, invalidate slot
-            auto const prev_state = slot.state.exchange(invalid_producer(s), mo::rls);
-            if (prev_state == invalid_consumer(s)) {
-                // consumer ABA occurred first, close slot and increment reference count
-                std::atomic_thread_fence(mo::acq);
-                slot.state.store(closed(s), mo::lax);
-                ++ref.cnt;
-            }
-            return false;
-        }
-
-        // everything looks good, attempt to write
-        slot.item = std::forward<U>(v);
-        auto const new_state = pushed(s);
-        auto const prev_state = slot.state.exchange(new_state, mo::rls);
-        if (prev_state == open(s))
-            return true; // success!
-
-        // consumer ABA occurred first, recover item and increment reference count 
-        assert(prev_state == invalid_consumer(s));
-        std::atomic_thread_fence(mo::acq);
-        v = std::move(slot.item);
-        assert(new_state == closed(s));
-        ++ref.cnt;
-        return false;
-    }
-
-    bool pop_from_slot(T& v, Slot& slot, TaggedPtr ptr) noexcept {
-        auto const s = nodes_[ptr.addr].state;
+        auto curr_state = open(s);
         if (obstruction_free || s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
-            auto const prev_state = slot.state.exchange(new_state, mo::rls);
-            if (prev_state == open(s))
+            if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
                 return false; // slot invalidated
-
-            std::atomic_thread_fence(mo::acq);
-
-            if (prev_state == invalid_producer(s)) {
-                // producer ABA occurred first, close slot
-                slot.state.store(closed(s), mo::rls);
-                return false;
             }
-
-            // producer wrote item first, success! grab item and close slot 
-            assert(prev_state == pushed(s));
-            v = std::move(slot.item);
-            slot.state.store(closed(s), mo::rls);
-            return true;
+        } else {
+            // everything looks good, attempt to read
+            while ((curr_state = slot.state.load(mo::acq)) == open(s))
+                ;
         }
 
-        // everything looks good, attempt to read
-        state_t curr_state;
-        while ((curr_state = slot.state.load(mo::acq)) == open(s))
-            ;
+        if (node_ref_ok) {
+            ++ref.cnt; // consumer owns slot, increment reference count
+        }
 
         if (curr_state == invalid_producer(s)) {
             // producer ABA occurred, close slot
+            slot.state.store(closed(s), node_ref_ok ? mo::lax : mo::rls);
+            return false;
+        }
+
+        // success! grab item and close slot if needed
+        assert(curr_state == pushed(s));
+        v = std::move(slot.item);
+        if (!node_ref_ok) {
             slot.state.store(closed(s), mo::rls);
-            return false;
+        } else {
+            assert(curr_state == closed(s))
         }
-
-        // success! grab item and close slot
-        assert(curr_state == pushed(s));
-        v = std::move(slot.item);
-        slot.state.store(closed(s), mo::rls);
-        return true;
-    }
-
-    bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRef& ref) noexcept {
-        auto const s = nodes_[ptr.addr].state;
-        if (obstruction_free || s != ptr.state) {
-            // consumer ABA occurred, attempt to invalidate slot
-            auto const new_state = invalid_consumer(s);
-            auto const prev_state = slot.state.exchange(new_state, mo::rls);
-            if (prev_state == open(s))
-                return false; // slot invalidated
-
-            // consumer owns slot, increment reference count
-            std::atomic_thread_fence(mo::acq);
-            ++ref.cnt;
-
-            if (prev_state == invalid_producer(s)) {
-                // producer ABA occurred first
-                assert(new_state == closed(s));
-                return false;
-            }
-
-            // producer wrote item first, success! grab item
-            assert(prev_state == pushed(s));
-            v = std::move(slot.item);
-            assert(new_state == closed(s));
-            return true;
-        }
-
-        // everything looks good, attempt to read
-        state_t curr_state;
-        while ((curr_state = slot.state.load(mo::acq)) == open(s))
-            ;
-
-        ++ref.cnt; // consumer owns slot, increment reference count
-
-        if (curr_state == invalid_producer(s)) {
-            // producer ABA occurred, close slot
-            slot.state.store(closed(s), mo::lax);
-            return false;
-        }
-
-        // success! grab item
-        assert(curr_state == pushed(s));
-        v = std::move(slot.item);
-        assert(curr_state == closed(s));
         return true;
     }
 
@@ -528,16 +463,18 @@ private:
 
     bool get_next_tail(TaggedPtr& curr_tail) noexcept {
         // attempt to advance the tail first
-        if (advance_ptr(tail_, curr_tail))
+        if (advance_ptr(tail_, curr_tail)) {
             return true;
+        }
 
         // no more nodes in the queue, attempt to allocate
         auto const alloc_addr = free_list_.try_pop(curr_tail);
         if (curr_tail.addr == null_addr) {
             curr_tail = tail_.load(mo::csm);
             return true;
-        } else if (alloc_addr == null_addr)
+        } else if (alloc_addr == null_addr) {
             return false; // free-list is empty
+        }
 
         // allocation succeeded, prepare new node to be added
         auto& alloc_node = nodes_[alloc_addr];
@@ -557,8 +494,9 @@ private:
                     done = true;
                 }
             }
-            if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm))
+            if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm)) {
                 remove_node_reference(curr_back.addr);
+            }
         }
 
         // now that new node is added, advance the tail
@@ -627,9 +565,9 @@ private:
             while (curr_head.addr != null_addr) {
                 new_head.addr = nodes_[curr_head.addr].free_next.load(mo::lax);
                 new_head.state = curr_head.state + 1;
-                if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::csm))
+                if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::csm)) {
                     break; // success!
-                else if (q_tail_node.next.load(mo::lax) != null_ptr) {
+                } else if (q_tail_node.next.load(mo::lax) != null_ptr) {
                     q_tail.addr = null_addr; // indicate allocation is no longer needed
                     break;
                 }
