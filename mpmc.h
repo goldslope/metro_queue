@@ -11,12 +11,14 @@ class MetroQueuePtr {
     typedef MetroQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
 
 public:
+
+    // TODO: allocate_shared instead of make_shared???
     MetroQueuePtr(size_t queue_capacity, size_t node_capacity) :
         q_ptr(make_shared<queue_t>(MetroQueue::Key{0}, queue_capacity, node_capacity)) {}
 
     std::shared_ptr<queue_t>& operator->() const noexcept {return q_ptr;}
 
-    void swap(MetroQueuePtr& other) {q_ptr.swap(other);}
+    void swap(MetroQueuePtr& other) {q_ptr.swap(other.q_ptr);}
     bool operator==(MetroQueuePtr& const other) const noexcept {return q_ptr == other.q_ptr;}
     bool operator!=(MetroQueuePtr& const other) const noexcept {return q_ptr != other.q_ptr;}
 
@@ -147,12 +149,10 @@ public:
 private:
     template <typename U>
     static constexpr auto is_valid_push_value =
-        is_same_v<std::remove_reference_t<U>, T> &&
         is_nothrow_assignable_v<T, U>
 
     template <typename Iter>
     static constexpr auto is_valid_base_iterator =
-        is_same_v<std::iterator_traits<Iter>::value_type, T> &&
         is_same_v<std::iterator_traits<Iter>::iterator_category, std::random_access_iterator_tag>
 
     template <typename Iter>
@@ -229,7 +229,7 @@ private:
         rls = std::memory_order_release,
     }
 
-    static constexpr auto cache_line_size = 128;
+    static constexpr auto no_false_sharing_alignment = std::hardware_destructive_interference_size;
     static constexpr auto null_addr = std::numeric_limits<address_t>::max();
     static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
         auto const max_a = std::numeric_limits<size_t>::max();
@@ -500,7 +500,7 @@ private:
         return true;
     }
 
-    struct alignas(cache_line_size) Slot {
+    struct alignas(no_false_sharing_alignment) Slot {
         std::atomic<state_t> state = 0;
         T item;
     };
@@ -534,11 +534,11 @@ private:
         state = 0;
 
         // atomics
-        alignas(cache_line_size) std::atomic<TaggedPtr> next = {null_addr, 0};
-        alignas(cache_line_size) std::atomic<address_t> free_next = null_addr;
+        alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> next = {null_addr, 0};
+        alignas(no_false_sharing_alignment) std::atomic<address_t> free_next = null_addr;
         std::atomic<size_t> ref_cnt; // same cacheline as free next
-        alignas(cache_line_size) std::atomic<size_t> enq_idx = 0;
-        alignas(cache_line_size) std::atomic<size_t> deq_idx = 0;
+        alignas(no_false_sharing_alignment) std::atomic<size_t> enq_idx = 0;
+        alignas(no_false_sharing_alignment) std::atomic<size_t> deq_idx = 0;
     };
 
     struct FreeList {
@@ -576,10 +576,10 @@ private:
 
     size_t slots_per_node_; // constant after construction
     Node* nodes_; // constant after construction
-    alignas(cache_line_size) free_list_;
-    alignas(cache_line_size) std::atomic<TaggedPtr> head_;
-    alignas(cache_line_size) std::atomic<TaggedPtr> tail_;
-    alignas(cache_line_size) std::atomic<TaggedPtr> back_;
+    alignas(no_false_sharing_alignment) free_list_;
+    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> head_;
+    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> tail_;
+    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> back_;
 
     friend MetroQueuePtr::MetroQueuePtr(size_t, size_t);
 };
