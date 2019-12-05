@@ -5,50 +5,50 @@
 using std::size_t;
 
 template <typename T,
-          auto node_ref_usage=MetroQueue::NodeRef::disabled,
-          auto progress_guarantee=MetroQueue::ProgressGuarantee::blocking>
+          MetroQueue::NodeRef::enabled_or_disabled node_ref_usage=MetroQueue::NodeRef::disabled,
+          MetroQueue::ProgressGuarantee progress_guarantee=MetroQueue::ProgressGuarantee::blocking,
+          typename Alloc>
 class MetroQueuePtr {
     typedef MetroQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
 
 public:
-
-    // TODO: allocate_shared instead of make_shared???
-    MetroQueuePtr(size_t queue_capacity, size_t node_capacity) :
-        q_ptr(make_shared<queue_t>(MetroQueue::Key{0}, queue_capacity, node_capacity)) {}
+    MetroQueuePtr(size_t queue_capacity,
+                  size_t node_capacity,
+                  Alloc const& alloc=std::allocator<T>()) :
+        q_ptr(allocate_shared<queue_t>(alloc,
+                                       MetroQueue::Key{0},
+                                       queue_capacity,
+                                       node_capacity,
+                                       alloc)) {}
 
     std::shared_ptr<queue_t>& operator->() const noexcept {return q_ptr;}
 
-    void swap(MetroQueuePtr& other) {q_ptr.swap(other.q_ptr);}
-    bool operator==(MetroQueuePtr& const other) const noexcept {return q_ptr == other.q_ptr;}
-    bool operator!=(MetroQueuePtr& const other) const noexcept {return q_ptr != other.q_ptr;}
+    bool operator==(MetroQueuePtr const& other) const noexcept {return q_ptr == other.q_ptr;}
+    bool operator!=(MetroQueuePtr const& other) const noexcept {return q_ptr != other.q_ptr;}
 
 private:
     queue_t* const get() const noexcept {return q_ptr.get();}
 
-    // non-movable
-    MetroQueuePtr(MetroQueuePtr&&) = delete;
-    MetroQueuePtr& operator=(MetroQueuePtr&&) = delete;
-
-    // disable addressing and heap allocation
-    MetroQueuePtr* operator&() = delete;
+    // disable heap allocation
     void* operator new(size_t) = delete;
     void* operator new(size_t, std::align_val_t) = delete;
     void operator delete(void*) = delete;
     void operator delete(void*, std::align_val_t) = delete;
 
-    std::shared_ptr<queue_t> const q_ptr;
+    std::shared_ptr<queue_t> const q_ptr; // single const member -> immutable
 
     friend class MetroQueue;
 };
 
-template <typename T, bool node_ref_ok, bool obstruction_free>
+template <typename T, bool node_ref_ok, bool obstruction_free, typename Alloc>
 class MetroQueue {
 public:
     class NodeRef {
     public:
         enum : bool enabled_or_disabled {enabled = true, disabled = false};
 
-        explicit NodeRef(MetroQueuePtr<T, true> q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
+        explicit NodeRef(MetroQueuePtr<T, true> const q) noexcept :
+            q_ptr(q), addr(null_addr), cnt(0) {}
         ~NodeRef() {release();}
 
         release() noexcept {
@@ -58,19 +58,17 @@ public:
             }
         }
 
-        // non-copyable and non-movable
+        // disable copy and move constructor
         NodeRef(NodeRef const&) = delete;
-        NodeRef& operator=(NodeRef const&) = delete;
 
-        // disable addressing and heap allocation
-        NodeRef* operator&() = delete;
+        // disable heap allocation
         void* operator new(size_t) = delete;
         void* operator new(size_t, std::align_val_t) = delete;
         void operator delete(void*) = delete;
         void operator delete(void*, std::align_val_t) = delete;
 
     private:
-        MetroQueuePtr<T, true> const q_ptr;
+        MetroQueuePtr<T, true> const q_ptr; // const member -> non-assignable
         address_t addr;
         size_t cnt;
 
@@ -112,9 +110,10 @@ private:
     };
 
 public:
-    MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key>& const,
+    MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key> const&,
                size_t queue_capacity,
-               size_t node_capacity) {
+               size_t node_capacity,
+               Alloc const& alloc) {
 
         node_capacity = std::max(node_capacity, 1);
 
