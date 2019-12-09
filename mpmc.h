@@ -9,25 +9,25 @@ template <typename T,
           MetroQueue::ProgressGuarantee progress_guarantee=MetroQueue::ProgressGuarantee::blocking,
           typename Alloc>
 class MetroQueuePtr {
-    typedef MetroQueue<T, node_ref_enabled, progress_guarantee>> queue_t;
+    using QueueType = MetroQueue<T, node_ref_enabled, progress_guarantee>>;
 
 public:
     MetroQueuePtr(size_t queue_capacity,
                   size_t node_capacity,
-                  Alloc const& alloc=std::allocator<T>()) :
-        q_ptr(allocate_shared<queue_t>(alloc,
+                  Alloc const& alloc=std::allocator<void>()) :
+        q_ptr(allocate_shared<QueueType>(alloc,
                                        MetroQueue::Key{0},
                                        queue_capacity,
                                        node_capacity,
                                        alloc)) {}
 
-    std::shared_ptr<queue_t>& operator->() const noexcept {return q_ptr;}
+    std::shared_ptr<QueueType>& operator->() const noexcept {return q_ptr;}
 
     bool operator==(MetroQueuePtr const& other) const noexcept {return q_ptr == other.q_ptr;}
     bool operator!=(MetroQueuePtr const& other) const noexcept {return q_ptr != other.q_ptr;}
 
 private:
-    queue_t* const get() const noexcept {return q_ptr.get();}
+    QueueType* const get() const noexcept {return q_ptr.get();}
 
     // disable heap allocation
     void* operator new(size_t) = delete;
@@ -35,7 +35,7 @@ private:
     void operator delete(void*) = delete;
     void operator delete(void*, std::align_val_t) = delete;
 
-    std::shared_ptr<queue_t> const q_ptr; // single const member -> immutable
+    std::shared_ptr<QueueType> const q_ptr; // single const member -> immutable
 
     friend class MetroQueue;
 };
@@ -47,7 +47,7 @@ public:
     public:
         enum : bool enabled_or_disabled {enabled = true, disabled = false};
 
-        explicit NodeRef(MetroQueuePtr<T, true> const q) noexcept :
+        explicit NodeRef(MetroQueuePtr const q) noexcept :
             q_ptr(q), addr(null_addr), cnt(0) {}
         ~NodeRef() {release();}
 
@@ -68,7 +68,7 @@ public:
         void operator delete(void*, std::align_val_t) = delete;
 
     private:
-        MetroQueuePtr<T, true> const q_ptr; // const member -> non-assignable
+        MetroQueuePtr const q_ptr; // const member -> non-assignable
         address_t addr;
         size_t cnt;
 
@@ -109,41 +109,74 @@ private:
         explicit Key(int) {}
     };
 
+    using NodeAlloc = std::allocator_traits<Alloc>::rebind_alloc<Node>;
+    using SlotAlloc = std::allocator_traits<Alloc>::rebind_alloc<Slot>;
+
 public:
     MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key> const&,
                size_t queue_capacity,
                size_t node_capacity,
-               Alloc const& alloc) {
+               Alloc const& alloc) : alloc_(alloc) {
 
         node_capacity = std::max(node_capacity, 1);
 
         // determine number of nodes
-        auto num_nodes = round_divide(queue_capacity, node_capacity)
-        num_nodes = std::min(num_nodes, null_addr);
-        num_nodes = std::max(num_nodes, 2);
+        num_nodes_ = round_divide(queue_capacity, node_capacity)
+        num_nodes_ = std::min(num_nodes_, null_addr);
+        num_nodes_ = std::max(num_nodes_, 2);
 
         // determine slots per node
-        slots_per_node_ = round_divide(queue_capacity, num_nodes);
+        slots_per_node_ = round_divide(queue_capacity, num_nodes_);
         slots_per_node_ = std::max(slots_per_node_, node_capacity);
 
+        // setup allocators
+        NodeAlloc node_alloc{alloc_};
+        SlotAlloc slot_alloc{alloc_};
+
+        // allocate and initialize nodes
+        nodes_ = std::allocator_traits<NodeAlloc>.allocate(node_alloc, num_nodes_);
+        for (size_t i = 0; i < num_nodes_; ++i) {
+            std::allocator_traits<NodeAlloc>.construct(node_alloc, &nodes_[i], refs_per_node());
+        }
+
+        // allocate and initialize slots
+        auto const num_slots = num_nodes_ * slots_per_node_;
+        slots_ = std::allocator_traits<SlotAlloc>.allocate(slot_alloc, num_slots);
+        for (size_t i = 0; i < num_slots; ++i) {
+            std::allocator_traits<SlotAlloc>.construct(slot_alloc, &slots_[i]);
+        }
+
         // setup free-list
-        nodes_ = new Node[num_nodes];
-        nodes_[0].init();
-        for (size_t i = 1; i < num_nodes; ++i) {
-            nodes_[i].init();
+        for (size_t i = 1; i < num_nodes_; ++i) {
             nodes_[i].free_next_ = i - 1;
         }
-        free_list.head = {num_nodes - 1};
+        free_list.head = {num_nodes_ - 1};
 
         // setup queue
-        auto const init_addr = free_list_.try_pop(Node());
+        auto const init_addr = free_list_.try_pop();
         head_ = {init_addr, 0};
         tail_ = {init_addr, 0};
         back_ = {init_addr, 0};
     }
 
-    MetroQueue() = delete;
-    ~MetroQueue() {delete[] nodes_;}
+    ~MetroQueue() {
+        // setup allocators
+        NodeAlloc node_alloc{alloc_};
+        SlotAlloc slot_alloc{alloc_};
+
+        // destroy and deallocate nodes
+        for (size_t i = 0; i < num_nodes_; ++i) {
+            std::allocator_traits<NodeAlloc>.destroy(node_alloc, &nodes_[i]);
+        }
+        std::allocator_traits<NodeAlloc>.deallocate(node_alloc, nodes_, num_nodes_);
+
+        // destroy and deallocate slots
+        auto const num_slots = num_nodes_ * slots_per_node_;
+        for (size_t i = 0; i < num_slots; ++i) {
+            std::allocator_traits<SlotAlloc>.destroy(slot_alloc, &slots_[i]);
+        }
+        slots_ = std::allocator_traits<SlotAlloc>.deallocate(slot_alloc, slots_, num_slots);
+    }
 
 private:
     template <typename U>
@@ -171,16 +204,16 @@ public:
     }
 
     bool try_pop(T& v) noexcept {
-        return try_pop(v, 1, TmpNodeRef<node_ref_ok>{this});
+        return try_pop(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
     }
 
     template <typename = std::enable_if_t<node_ref_ok>>
     bool try_pop(T& v, NodeRef& ref) noexcept {
         if (ref.q_ptr.get() != this) {
-            return try_pop(v, 1, TmpNodeRef<node_ref_ok>{this});
+            return try_pop(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
         }
 
-        return try_pop(v, 1, ref);
+        return try_pop(TmpIterator{v}, 1, ref);
     }
 
     template <typename Iter,
@@ -249,13 +282,14 @@ private:
 
         for (;;) {
             auto& node = nodes_[curr_tail.addr];
+            auto const slot_offset = curr_tail.addr * slots_per_node_;
             auto enq_idx = node.enq_idx.fetch_add(item_cnt, mo::acq);
             if (enq_idx > slots_per_node_) {
                 auto slot_cnt = item_cnt;
                 do {
                     // slot acquired, try pushing to slot
                     bool pushed;
-                    auto const& slot = node.slots[enq_idx];
+                    auto const& slot = slots_[slot_offset + enq_idx];
                     if (node_ref_ok) {
                         pushed = push_to_slot(*it, slot, curr_tail, ref);
                     } else {
@@ -290,6 +324,7 @@ private:
             }
 
             auto& node = nodes_[curr_head.addr];
+            auto const slot_offset = curr_head.addr * slots_per_node_;
             size_t deq_idx, enq_idx;
             deq_idx = 0;
             enq_idx = node.enq_idx.load(mo::lax);
@@ -299,7 +334,7 @@ private:
                     do {
                         // slot acquired, try popping from slot
                         bool popped;
-                        auto const& slot = node.slots[deq_idx];
+                        auto const& slot = slots_[slot_offset + deq_idx];
                         if (node_ref_ok) {
                             popped = pop_from_slot(*it, slot, curr_head, ref);
                         } else {
@@ -333,7 +368,7 @@ private:
                 do {
                     // slot acquired, try popping from slot
                     bool popped;
-                    auto const& slot = node.slots[deq_idx];
+                    auto const& slot = slots_[slot_offset + deq_idx];
                     if (node_ref_ok) {
                         popped = pop_from_slot(*it, slot, curr_head, ref);
                     } else {
@@ -428,17 +463,22 @@ private:
 
     void remove_node_reference(address_t const addr, int const rmv_cnt=1) noexcept {
         auto& node = nodes_[addr];
+        auto const slot_offset = addr * slots_per_node_;
         auto const prev_cnt = node.ref_cnt.fetch_sub(rmv_cnt, node_ref_ok ? mo::rls : mo::lax);
         if (prev_cnt == rmv_cnt) {
             if (!node_ref_ok) {
                 // wait for all slots to be closed
-                for (size_t i = 0; i < slots_per_node_; ++i) {
-                    while (node.slots[i].state != closed(node.state))
-                        ;
-                }
+                size_t closed_cnt;
+                do {
+                    closed_cnt = 0
+                    for (size_t i = 0; i < slots_per_node_; ++i) {
+                        auto const& slot = slots_[slot_offset + i];
+                        closed_cnt += slot.state.load(mo::lax) == closed(node.state)
+                    }
+                } while (closed_cnt < slots_per_node_);
             }
             std::atomic_thread_fence(mo::acq); // synchronize with all releases
-            free_list_.push(addr);
+            free_list_.dealloc(addr);
         }
     }
 
@@ -463,7 +503,7 @@ private:
         }
 
         // no more nodes in the queue, attempt to allocate
-        auto const alloc_addr = free_list_.try_pop(curr_tail);
+        auto const alloc_addr = free_list_.try_alloc(curr_tail);
         if (curr_tail.addr == null_addr) {
             curr_tail = tail_.load(mo::csm);
             return true;
@@ -473,13 +513,13 @@ private:
 
         // allocation succeeded, prepare new node to be added
         auto& alloc_node = nodes_[alloc_addr];
-        alloc_node.reset();
+        alloc_node.reset(refs_per_node());
 
         // append new node to end of the queue 
         TaggedPtr alloc_ptr = {alloc_addr, alloc_node.state};
         auto curr_back = back_.load(mo::csm);
         auto done = false;
-        while (!done) {
+        do {
             auto& next_ptr = nodes_[curr_back.addr].next;
             auto curr_next = next_ptr.load(mo::csm); 
             TaggedPtr const null_ptr = {null_addr, curr_back.state};
@@ -492,16 +532,21 @@ private:
             if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm)) {
                 remove_node_reference(curr_back.addr);
             }
-        }
+        } while(!done);
 
         // now that new node is added, advance the tail
         advance_ptr(tail_, curr_tail);
         return true;
     }
 
+    constexpr auto refs_per_node() const noexcept {
+        // head_, tail_, back_ = 3 pointers = 3 references
+        return node_ref_ok ? slots_per_node_ + 3 : 3;
+    }
+
     struct alignas(no_false_sharing_alignment) Slot {
+        T item; // TODO: used aligned storage instead + constructor / destructor
         std::atomic<state_t> state = 0;
-        T item;
     };
 
     struct TaggedPtr {
@@ -510,38 +555,26 @@ private:
     };
 
     struct Node {
-        void init (size_t const capacity) {
-            num_slots = capacity
-            slots = new Slot[num_slots]
-            ref_cnt = num_refs()
-        }
-        ~Node() {delete[] slots;}
+        Node (size_t const init_ref_cnt) : ref_cnt(init_ref_cnt) {}
 
-        void reset () noexcept {
+        void reset (size_t const init_ref_cnt) noexcept {
             state = closed(state);
-            ref_cnt.store(num_refs(), mo::lax);
+            ref_cnt.store(init_ref_cnt, mo::lax);
             enq_idx.store(0, mo::rls); // release to synchronize with producers
             deq_idx.store(0, mo::rls); // release to synchronize with consumers
             next.store({null_addr, state}, mo::lax); // not included in synchronization
         }
 
-        // head_, tail_, back_ = 3 pointers = 3 references
-        constexpr auto num_refs() const noexcept {return node_ref_ok ? num_slots + 3 : 3;}
-
-        size_t num_slots; // constant after init()
-        Slot* slots = nullptr; // constant after init()
-        state = 0;
-
-        // atomics
         alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> next = {null_addr, 0};
         alignas(no_false_sharing_alignment) std::atomic<address_t> free_next = null_addr;
-        std::atomic<size_t> ref_cnt; // same cacheline as free next
+        state_t state = 0;
         alignas(no_false_sharing_alignment) std::atomic<size_t> enq_idx = 0;
         alignas(no_false_sharing_alignment) std::atomic<size_t> deq_idx = 0;
+        alignas(no_false_sharing_alignment) std::atomic<size_t> ref_cnt;
     };
 
     struct FreeList {
-        void push(address_t const new_addr) noexcept {
+        void dealloc(address_t const new_addr) noexcept {
             auto curr_head = head.load(mo::lax);
             TaggedPtr new_head = {new_addr};
             do {
@@ -550,9 +583,14 @@ private:
             } while (!head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::lax));
         }
 
-        address_t try_pop(TaggedPtr const& q_tail) noexcept {
-            auto curr_head = head.load(mo::csm);
+        address_t try_alloc() noexcept {
+            try_alloc<false>({null_addr, 0});
+        }
+
+        template <bool q_tail_check=true>
+        address_t try_alloc(TaggedPtr const& q_tail) noexcept {
             auto const& q_tail_node = nodes_[q_tail.addr];
+            auto curr_head = head.load(mo::csm);
             TaggedPtr const null_ptr = {null_addr, q_tail.state};
             TaggedPtr new_head;
  
@@ -562,7 +600,7 @@ private:
                 new_head.state = curr_head.state + 1;
                 if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::csm)) {
                     break; // success!
-                } else if (q_tail_node.next.load(mo::lax) != null_ptr) {
+                } else if (q_tail_check && q_tail_node.next.load(mo::lax) != null_ptr) {
                     q_tail.addr = null_addr; // indicate allocation is no longer needed
                     break;
                 }
@@ -573,8 +611,11 @@ private:
         std::atomic<TaggedPtr> head;
     };
 
+    Alloc const alloc_;
+    size_t num_nodes_; // constant after construction
     size_t slots_per_node_; // constant after construction
     Node* nodes_; // constant after construction
+    Slot* slots_; // constant after construction
     alignas(no_false_sharing_alignment) free_list_;
     alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> head_;
     alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> tail_;
