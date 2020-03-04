@@ -5,21 +5,23 @@
 using std::size_t;
 
 template <typename T,
-          MetroQueue::NodeRef::enabled_or_disabled node_ref_usage=MetroQueue::NodeRef::disabled,
-          MetroQueue::ProgressGuarantee progress_guarantee=MetroQueue::ProgressGuarantee::blocking,
-          typename Alloc>
+          bool single_consumer = false,
+          bool single_producer = false,
+          bool node_ref_ok = false,
+          bool relax_node_load = false,
+          typename Alloc = std::allocator<void>>
 class MetroQueuePtr {
     using QueueType = MetroQueue<T, node_ref_enabled, progress_guarantee>>;
 
 public:
     MetroQueuePtr(size_t queue_capacity,
                   size_t node_capacity,
-                  Alloc const& alloc=std::allocator<void>()) :
-        q_ptr(allocate_shared<QueueType>(alloc,
-                                       MetroQueue::Key{0},
-                                       queue_capacity,
-                                       node_capacity,
-                                       alloc)) {}
+                  Alloc const& alloc = std::allocator<void>()) :
+        q_ptr{allocate_shared<QueueType>{alloc,
+                                         MetroQueue::Key{0},
+                                         queue_capacity,
+                                         node_capacity,
+                                         alloc}} {}
 
     std::shared_ptr<QueueType>& operator->() const noexcept {return q_ptr;}
 
@@ -40,18 +42,25 @@ private:
     friend class MetroQueue;
 };
 
-template <typename T, bool node_ref_ok, bool obstruction_free, typename Alloc>
+template <typename T,
+          bool single_consumer,
+          bool single_producer,
+          bool node_ref_ok,
+          bool relax_node_load,
+          typename Alloc,
+          typename = std::enable_if<!single_consumer || !node_ref_ok>::type>
 class MetroQueue {
 public:
     class NodeRef {
     public:
-        enum : bool enabled_or_disabled {enabled = true, disabled = false};
+        //TODO: put the following in the right areas
+        //enum : bool enabled_or_disabled {enabled = true, disabled = false};
+        //MetroQueue::NodeRef::enabled_or_disabled node_ref_usage = MetroQueue::NodeRef::disabled,
 
-        explicit NodeRef(MetroQueuePtr const q) noexcept :
-            q_ptr(q), addr(null_addr), cnt(0) {}
+        explicit NodeRef(MetroQueuePtr const& q) noexcept : q_ptr{q}, addr{null_addr}, cnt{0} {}
         ~NodeRef() {release();}
 
-        release() noexcept {
+        void release() noexcept {
             if (cnt > 0 && addr != null_addr) {
                 q_ptr->remove_node_reference(addr, cnt);
                 cnt = 0;
@@ -75,16 +84,19 @@ public:
         friend class MetroQueue;
     };
 
-    enum class : bool ProgressGuarantee {obstruction_free = true, blocking = false}
-
 private:
     template <bool enabled>
     struct TmpNodeRef {
-        explicit TmpNodeRef(MetroQueue* q) noexcept : q_ptr(q), addr(null_addr), cnt(0) {}
+        TmpNodeRef(MetroQueue const* q) noexcept : q_ptr{q}, addr{null_addr}, cnt{0} {}
+        TmpNodeRef(MetroQueue const* q, address_t a) noexcept : q_ptr{q}, addr{a}, cnt{0} {}
         ~TmpNodeRef() {release();}
 
-        release() noexcept {
-            if (enabled && cnt > 0 && addr != null_addr) {
+        template <bool fake_ref = !enabled, std::enable_if<fake_ref, int>::type = 0>
+        constexpr void release() const noexcept {}
+
+        template <bool real_ref = enabled, std::enable_if<real_ref, int>::type = 0>
+        void release() noexcept {
+            if (cnt > 0 && addr != null_addr) {
                 q_ptr->remove_node_reference(addr, cnt);
                 cnt = 0;
             }
@@ -97,9 +109,9 @@ private:
 
     template <typename U>
     struct TmpIterator {
-        TmpIterator(U&& v) noexcept : val(v) {}
-        U&& operator*() const noexcept {return val;}
-        TmpIterator& operator+=() const noexcept {}
+        constexpr TmpIterator(U&& v) noexcept : val{v} {}
+        constexpr U&& operator*() const noexcept {return val;}
+        constexpr TmpIterator& operator+=() const noexcept {}
 
         U&& val;
     };
@@ -113,10 +125,10 @@ private:
     using SlotAlloc = std::allocator_traits<Alloc>::rebind_alloc<Slot>;
 
 public:
-    MetroQueue(std::enable_if_t<is_nothrow_move_assignable_v<T>, Key> const&,
+    MetroQueue(Key const&,
                size_t queue_capacity,
                size_t node_capacity,
-               Alloc const& alloc) : alloc_(alloc) {
+               Alloc const& alloc) : alloc_{alloc} {
 
         node_capacity = std::max(node_capacity, 1);
 
@@ -175,79 +187,96 @@ public:
         for (size_t i = 0; i < num_slots; ++i) {
             std::allocator_traits<SlotAlloc>.destroy(slot_alloc, &slots_[i]);
         }
-        slots_ = std::allocator_traits<SlotAlloc>.deallocate(slot_alloc, slots_, num_slots);
+        std::allocator_traits<SlotAlloc>.deallocate(slot_alloc, slots_, num_slots);
     }
 
 private:
     template <typename U>
     static constexpr auto is_valid_push_value =
-        is_nothrow_assignable_v<T, U>
+        std::is_nothrow_assignable<T&, U&&>::value &&
+        (single_consumer || is_valid_pop_value<U>)
+
+    template <typename U>
+    static constexpr auto is_valid_pop_value =
+        std::is_nothrow_assignable<U&&, T&>::value ||
+        std::is_nothrow_assignable<U&&, T&&>::value
 
     template <typename Iter>
     static constexpr auto is_valid_base_iterator =
-        is_same_v<std::iterator_traits<Iter>::iterator_category, std::random_access_iterator_tag>
+        std::is_same<std::iterator_traits<Iter>::iterator_category,
+                     std::random_access_iterator_tag>::value>
 
     template <typename Iter>
     static constexpr auto is_valid_push_iterator =
-        is_valid_base_iterator<Iter> &&
-        is_nothrow_assignable_v<T, std::iterator_traits<Iter>::reference>
+        is_valid_push_value<std::iterator_traits<Iter>::reference> &&
+        is_valid_base_iterator<Iter>
 
     template <typename Iter>
     static constexpr auto is_valid_pop_iterator =
-        is_valid_base_iterator<Iter> &&
-        !is_const<std::iterator_traits<Iter>::reference>
+        is_valid_pop_value<std::iterator_traits<Iter>::reference> &&
+        is_valid_base_iterator<Iter>
 
 public:
-    template <typename U, typename = std::enable_if_t<is_valid_push_value<U>>>
+    template <typename U, typename = std::enable_if<is_valid_push_value<U>>::type>
     bool try_push(U&& v) noexcept {
-        return try_push(TmpIterator{std::forward<U>(v)}, 1);
-    }
-
-    bool try_pop(T& v) noexcept {
-        return try_pop(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
-    }
-
-    template <typename = std::enable_if_t<node_ref_ok>>
-    bool try_pop(T& v, NodeRef& ref) noexcept {
-        if (ref.q_ptr.get() != this) {
-            return try_pop(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
+        if (single_producer) {
+            return try_push_one(v);
         }
 
-        return try_pop(TmpIterator{v}, 1, ref);
+        return try_push_many(TmpIterator{v}, 1);
     }
 
-    template <typename Iter,
-              typename = std::enable_if_t<is_valid_push_iterator<Iter>>>
+    template <typename U, typename = std::enable_if<is_valid_pop_value<U>>::type>
+    bool try_pop(U&& v) noexcept {
+        if (single_consumer) {
+            return try_pop_one(v);
+        }
+
+        return try_pop_many(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
+    }
+
+    template <typename U, typename = std::enable_if<node_ref_ok &&
+                                                    is_valid_pop_value<U>::type>
+    bool try_pop(U&& v, NodeRef& ref) noexcept {
+        if (ref.q_ptr.get() != this) {
+            return try_pop_many(TmpIterator{v}, 1, TmpNodeRef<node_ref_ok>{this});
+        }
+
+        return try_pop_many(TmpIterator{v}, 1, ref);
+    }
+
+    template <typename Iter, typename = std::enable_if<!single_producer &&
+                                                       is_valid_push_iterator<Iter>>::type>
     size_t try_push(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
         if (item_cnt > 0) {
-            return try_push(begin, item_cnt);
+            return try_push_many(begin, item_cnt);
         }
 
         return 0;
     }
 
-    template <typename Iter,
-              typename = std::enable_if_t<is_valid_pop_iterator<Iter>>>
+    template <typename Iter, typename = std::enable_if<!single_consumer &&
+                                                       is_valid_pop_iterator<Iter>>::type>
     size_t try_pop(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
         if (item_cnt > 0) {
-            return try_pop(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
+            return try_pop_many(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
         }
 
         return 0;
     }
 
-    template <typename Iter,
-              typename = std::enable_if_t<is_valid_pop_iterator<Iter> && node_ref_ok>>
+    template <typename Iter, typename = std::enable_if<node_ref_ok &&
+                                                       is_valid_pop_iterator<Iter>>::type>
     size_t try_pop(Iter begin, Iter end, NodeRef& ref) noexcept {
         auto const item_cnt = end - begin;
         if (item_cnt > 0) {
             if (ref.q_ptr.get() != this) {
-                return try_pop(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
+                return try_pop_many(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
             }
 
-            return try_pop(begin, item_cnt, ref);
+            return try_pop_many(begin, item_cnt, ref);
         }
 
         return 0;
@@ -268,33 +297,65 @@ private:
         auto const round_a = std::min(a, max_a - b + 1) + b - 1;
         return round_a / b;
     }
+
     static constexpr state_t open(state_t const s) noexcept {return s;}
-    static constexpr state_t pushed(state_t const s) noexcept {return s + 2;}
+    static constexpr state_t pushed(state_t const s) noexcept {
+        return s + (single_producer ? 1 : 2);
+    }
     static constexpr state_t invalid_producer(state_t const s) noexcept {return s + 1;}
-    static constexpr state_t invalid_consumer(state_t const s) noexcept {return s + 2;}
-    static constexpr state_t closed(state_t const s) noexcept {return s + (node_ref_ok ? 2 : 3);}
+    static constexpr state_t invalid_consumer(state_t const s) noexcept {return pushed(s);}
+    static constexpr state_t closed(state_t const s) noexcept {
+        return pushed(s) + (!single_consumer && !node_ref_ok);
+    }
+
+    template <typename U>
+    bool try_push_one(U&& v) /* single producer only */ noexcept {
+        auto curr_tail = tail_.load(mo::lax);
+        auto& ref = TmpNodeRef<node_ref_ok>{this, curr_tail.addr};
+
+        for (;;) {
+            auto& node = nodes_[curr_tail.addr];
+            auto const slot_offset = curr_tail.addr * slots_per_node_;
+            auto const enq_idx = node.enq_idx.load(mo::lax)
+            if (enq_idx < slots_per_node_) {
+                // slot acquired, try pushing to slot
+                auto const& slot = slots_[slot_offset + enq_idx];
+                auto const pushed = push_to_slot(v, slot, curr_tail, ref);
+                node.enq_idx.store(enq_idx + 1, single_consumer ? mo::rls : mo::lax);
+
+                if (pushed) {
+                    break;
+                }
+            } else if (!get_next_tail(curr_tail)) {
+                return false; // full
+            }
+
+            if (node_ref_ok && ref.addr != curr_tail.addr) {
+                ref.release();
+                ref.addr = curr_tail.addr;
+            }
+        }
+
+        return true;
+    }
 
     template <typename Iter>
-    size_t try_push(Iter it, size_t const item_cnt) noexcept {
+    size_t try_push_many(Iter it, size_t const item_cnt) noexcept {
         size_t push_cnt = 0;
-        auto curr_tail = tail_.load(mo::csm);
-        auto& ref = TmpNodeRef<node_ref_ok>{this};
+        auto curr_tail = tail_.load(relaxed_node_load ? mo::lax : mo::csm);
+        auto& ref = TmpNodeRef<node_ref_ok>{this, curr_tail.addr};
+        bool retry = true; // only for relaxed_node_load
 
         for (;;) {
             auto& node = nodes_[curr_tail.addr];
             auto const slot_offset = curr_tail.addr * slots_per_node_;
             auto enq_idx = node.enq_idx.fetch_add(item_cnt, mo::acq);
-            if (enq_idx > slots_per_node_) {
+            if (enq_idx < slots_per_node_) {
                 auto slot_cnt = item_cnt;
                 do {
                     // slot acquired, try pushing to slot
-                    bool pushed;
                     auto const& slot = slots_[slot_offset + enq_idx];
-                    if (node_ref_ok) {
-                        pushed = push_to_slot(*it, slot, curr_tail, ref);
-                    } else {
-                        pushed = push_to_slot(*it, slot, curr_tail);
-                    }
+                    auto const pushed = push_to_slot(*it, slot, curr_tail, ref);
                     it += pushed;
                     push_cnt += pushed;
                 } while (--slot_cnt > 0 && ++enq_idx < slots_per_node_);
@@ -304,23 +365,68 @@ private:
                 }
             }
 
+            if (relaxed_node_load && retry) {
+                retry = false;
+                curr_tail = tail_.load(mo::csm);
+                continue;
+            }
+
             if (enq_idx >= slots_per_node_ && !get_next_tail(curr_tail)) {
                 break; // full
+            }
+
+            if (node_ref_ok && ref.addr != curr_tail.addr) {
+                ref.release();
+                ref.addr = curr_tail.addr;
             }
         }
 
         return push_cnt;
     }
 
-    template <Iter it, typename NodeRefType>
-    bool try_pop(Iter it, size_t const item_cnt, NodeRefType& ref) noexcept {
-        size_t pop_cnt = 0;
-        auto curr_head = head_.load(mo::csm);
+    template <typename U>
+    size_t try_pop_one(U&& v) /* single consumer only */ noexcept {
+        auto curr_head = head_.load(mo::lax);
+        auto& ref = TmpNodeRef<node_ref_ok>{this, curr_head.addr};
 
         for (;;) {
-            if (node_ref_ok && ref.addr != curr_head.addr) {
-                ref.release();
-                ref.addr = curr_head.addr;
+            auto& node = nodes_[curr_head.addr];
+            auto const slot_offset = curr_head.addr * slots_per_node_;
+            auto const deq_idx = node.deq_idx.load(mo::lax);
+            auto const enq_idx = node.enq_idx.load(single_producer ? mo::acq : mo::lax);
+            if (deq_idx < enq_idx) {
+                // slot acquired, try pushing to slot
+                auto const& slot = slots_[slot_offset + deq_idx];
+                auto const popped = pop_from_slot(v, slot, curr_head, ref);
+                node.deq_idx.store(deq_idx + 1, mo::lax);
+
+                if (popped) {
+                    break;
+                }
+            } else if (deq_idx < slots_per_node_ || !get_next_head(curr_head)) { 
+                return false; // empty
+            }
+        }
+
+        return true;
+    }
+
+    template <Iter it, typename NodeRefType>
+    bool try_pop_many(Iter it, size_t const item_cnt, NodeRefType& ref) noexcept {
+        size_t pop_cnt = 0;
+        auto curr_head = head_.load(relaxed_node_load && !node_ref_ok ? mo::lax : mo::csm);
+
+        for (;;) {
+            if (node_ref_ok) {
+                if (relaxed_node_load && ref.cnt == 0) {
+                    curr_head = head_.load(mo::csm); // reload unrelaxed here
+                }
+                if (ref.addr != curr_head.addr) {
+                    if (ref.addr != curr_head.addr) {
+                        ref.release();
+                        ref.addr = curr_head.addr;
+                    }
+                }
             }
 
             auto& node = nodes_[curr_head.addr];
@@ -333,13 +439,8 @@ private:
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
                         // slot acquired, try popping from slot
-                        bool popped;
                         auto const& slot = slots_[slot_offset + deq_idx];
-                        if (node_ref_ok) {
-                            popped = pop_from_slot(*it, slot, curr_head, ref);
-                        } else {
-                            popped = pop_from_slot(*it, slot, curr_head);
-                        }
+                        auto const popped = pop_from_slot(*it, slot, curr_head, ref);
                         it += popped;
                         pop_cnt += popped;
                     } while (++deq_idx < new_idx);
@@ -367,13 +468,8 @@ private:
                 auto slot_cnt = item_cnt;
                 do {
                     // slot acquired, try popping from slot
-                    bool popped;
                     auto const& slot = slots_[slot_offset + deq_idx];
-                    if (node_ref_ok) {
-                        popped = pop_from_slot(*it, slot, curr_head, ref);
-                    } else {
-                        popped = pop_from_slot(*it, slot, curr_head);
-                    }
+                    auto const popped = pop_from_slot(*it, slot, curr_head, ref);
                     it += popped;
                     pop_cnt += popped;
                 } while (--slot_cnt > 0 && ++deq_idx < slots_per_node_);
@@ -383,7 +479,7 @@ private:
                 }
             }
 
-            if (deq_idx >= slots_per_node_ && !advance_ptr(head_, curr_head)) {
+            if (deq_idx >= slots_per_node_ && !get_next_head(curr_head)) {
                 break; // empty
             }
         }
@@ -391,18 +487,35 @@ private:
         return pop_cnt;
     }
 
-    template <typename U>
+    template <typename U, bool sc = single_consumer, std::enable_if<sc, int>::type = 0>
+    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef& ref) noexcept {
+        auto const s = nodes_[ptr.addr].state;
+        if (!single_producer && s != ptr.state) {
+            // producer ABA occurred, invalidate slot
+            slot.state.store(invalid_producer(s), mo::rls);
+            return false;
+        }
+
+        // everything looks good, push item
+        slot.item = std::forward<U>(v);
+        if (!single_producer) {
+            slot.state.store(pushed(s), mo::rls);
+        }
+        return true;
+    }
+
+    template <typename U, bool mc = !single_consumer, std::enable_if<mc, int>::type = 0>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if (s != ptr.state) {
+        if (!single_producer && s != ptr.state) {
             // producer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_producer(s);
             if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
                 return false; // slot invalidated
             }
         } else {
-            // everything looks good, attempt to write
+            // everything looks good, attempt to push item
             slot.item = std::forward<U>(v);
             auto const new_state = pushed(s);
             if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
@@ -410,7 +523,7 @@ private:
             }
 
             // consumer ABA occurred, recover item
-            v = std::move(slot.item);
+            v = std::is_nothrow_assignable<U&&, T&&> ? std::move(slot.item) : slot.item;
         }
 
         // consumer ABA occurred, close slot if needed
@@ -428,14 +541,14 @@ private:
     bool pop_from_slot(T& item, Slot& slot, TaggedPtr ptr, NodeRefType& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if (obstruction_free || s != ptr.state) {
+        if (!single_consumer && s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             if (slot.state.compare_and_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
                 return false; // slot invalidated
             }
-        } else {
-            // everything looks good, attempt to read
+        } else if (!single_producer || !single_consumer) {
+            // everything looks good, wait for producer
             while ((curr_state = slot.state.load(mo::acq)) == open(s))
                 ;
         }
@@ -444,42 +557,21 @@ private:
             ++ref.cnt; // consumer owns slot, increment reference count
         }
 
-        if (curr_state == invalid_producer(s)) {
+        if (!single_producer && curr_state == invalid_producer(s)) {
             // producer ABA occurred, close slot
-            slot.state.store(closed(s), node_ref_ok ? mo::lax : mo::rls);
+            slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
             return false;
         }
 
-        // success! grab item and close slot if needed
+        // success! pop item and close slot if needed
         assert(curr_state == pushed(s));
-        v = std::move(slot.item);
-        if (!node_ref_ok) {
+        v = std::is_nothrow_assignable<U&&, T&&> ? std::move(slot.item) : slot.item;
+        if (!single_consumer && !node_ref_ok) {
             slot.state.store(closed(s), mo::rls);
         } else {
-            assert(curr_state == closed(s))
+            assert(curr_state == closed(s));
         }
         return true;
-    }
-
-    void remove_node_reference(address_t const addr, int const rmv_cnt=1) noexcept {
-        auto& node = nodes_[addr];
-        auto const slot_offset = addr * slots_per_node_;
-        auto const prev_cnt = node.ref_cnt.fetch_sub(rmv_cnt, node_ref_ok ? mo::rls : mo::lax);
-        if (prev_cnt == rmv_cnt) {
-            if (!node_ref_ok) {
-                // wait for all slots to be closed
-                size_t closed_cnt;
-                do {
-                    closed_cnt = 0
-                    for (size_t i = 0; i < slots_per_node_; ++i) {
-                        auto const& slot = slots_[slot_offset + i];
-                        closed_cnt += slot.state.load(mo::lax) == closed(node.state)
-                    }
-                } while (closed_cnt < slots_per_node_);
-            }
-            std::atomic_thread_fence(mo::acq); // synchronize with all releases
-            free_list_.dealloc(addr);
-        }
     }
 
     bool advance_ptr(std::atomic<TaggedPtr>& ptr, TaggedPtr& curr_val) noexcept {
@@ -492,10 +584,33 @@ private:
             }
             return true;
         }
- 
         return false;
     }
 
+    template <bool sp = single_producer, std::enable_if<sp, int>::type = 0>
+    bool get_next_tail(TaggedPtr& curr_tail) noexcept {
+        // attempt to allocate
+        auto const alloc_addr = free_list_.try_alloc();
+        if (alloc_addr == null_addr) {
+            return false; // free-list is empty
+        }
+
+        // allocation succeeded, prepare new node to be added
+        auto& alloc_node = nodes_[alloc_addr];
+        alloc_node.reset();
+
+        // append new node to end of the queue
+        TaggedPtr alloc_ptr = {alloc_addr, alloc_node.state};
+        auto& next_ptr = nodes_[curr_tail.addr].next;
+        next_ptr.store(alloc_ptr, mo::rls);
+
+        // now that new node is added, advance the tail
+        curr_tail = alloc_ptr;
+        tail_.store(curr_tail, mo::lax);
+        return true;
+    }
+
+    template <bool mp = !single_producer, std::enable_if<mp, int>::type = 0>
     bool get_next_tail(TaggedPtr& curr_tail) noexcept {
         // attempt to advance the tail first
         if (advance_ptr(tail_, curr_tail)) {
@@ -539,13 +654,64 @@ private:
         return true;
     }
 
+    template <bool sc = single_consumer, std::enable_if<sc, int>::type = 0>
+    bool get_next_head(TaggedPtr& curr_head) noexcept {
+        auto const& next_ptr = nodes_[curr_head.addr].next;
+        auto const curr_next = next_ptr.load(mo::csm);
+        TaggedPtr const null_ptr = {null_addr, curr_head.state};
+        if (curr_next == null_ptr) {
+            return false;
+        }
+
+        // next node is not null, advance the head
+        curr_head = curr_next;
+        head_.store(curr_head, mo::lax);
+        return true;
+    }
+
+    template <bool mc = !single_consumer, std::enable_if<mc, int>::type = 0>
+    bool get_next_head(TaggedPtr& curr_head) noexcept {
+        return advance_ptr(head_, curr_head);
+    }
+
+    template <bool sc = single_consumer, std::enable_if<sc, int>::type = 0>
+    void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
+        auto& node = nodes_[addr];
+        if (single_producer || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt,  mo::acq_rls)) {
+            free_list_.dealloc(addr);
+        }
+    }
+
+    template <bool mc = !single_consumer, std::enable_if<mc, int>::type = 0>
+    void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
+        auto& node = nodes_[addr];
+        auto const sub_memory_order = node_ref_ok ? mo::acq_rls : mo::lax;
+        if (single_producer || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, sub_memory_order)) {
+            if (!node_ref_ok) {
+                // wait for all slots to be closed
+                auto const slot_offset = addr * slots_per_node_;
+                size_t closed_cnt;
+                do {
+                    closed_cnt = 0
+                    for (size_t i = 0; i < slots_per_node_; ++i) {
+                        auto const& slot = slots_[slot_offset + i];
+                        closed_cnt += slot.state.load(mo::lax) == closed(node.state)
+                    }
+                } while (closed_cnt < slots_per_node_);
+                std::atomic_thread_fence(mo::acq); // synchronize with all releases
+            }
+            free_list_.dealloc(addr);
+        }
+    }
+
     constexpr auto refs_per_node() const noexcept {
-        // head_, tail_, back_ = 3 pointers = 3 references
-        return node_ref_ok ? slots_per_node_ + 3 : 3;
+        // head_, tail_, back_ = 3 pointers
+        auto const num_ptrs = single_producer ? 0 : 3;
+        return node_ref_ok ? slots_per_node_ + num_ptrs : num_ptrs;
     }
 
     struct alignas(no_false_sharing_alignment) Slot {
-        T item; // TODO: used aligned storage instead + constructor / destructor
+        T item;
         std::atomic<state_t> state = 0;
     };
 
@@ -555,11 +721,15 @@ private:
     };
 
     struct Node {
-        Node (size_t const init_ref_cnt) : ref_cnt(init_ref_cnt) {}
+        Node(size_t const init_ref_cnt) : ref_cnt{init_ref_cnt} {}
 
-        void reset (size_t const init_ref_cnt) noexcept {
-            state = closed(state);
+        void reset(size_t const init_ref_cnt) noexcept {
             ref_cnt.store(init_ref_cnt, mo::lax);
+            reset();
+        }
+
+        void reset() noexcept {
+            state = closed(state);
             enq_idx.store(0, mo::rls); // release to synchronize with producers
             deq_idx.store(0, mo::rls); // release to synchronize with consumers
             next.store({null_addr, state}, mo::lax); // not included in synchronization
