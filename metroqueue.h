@@ -780,7 +780,6 @@ private:
         }
 
         void reset() noexcept {
-            state = closed(state);
             enq_idx.store(0, mo::rls); // release to synchronize with producers
             deq_idx.store(0, mo::rls); // release to synchronize with consumers
             next.store({null_addr, state}, mo::lax); // not included in synchronization
@@ -795,12 +794,13 @@ private:
     };
 
     struct FreeList {
-        void dealloc(Node* nodes, address_t const new_addr) noexcept {
+        void dealloc(Node* nodes, address_t const addr) noexcept {
             auto curr_head = head.load(mo::lax);
-            TaggedPtr new_head = {new_addr};
+            TaggedPtr new_head = {addr};
             do {
                 new_head.state = curr_head.state;
-                nodes[new_addr].free_next.store(curr_head.addr, mo::lax);
+                nodes[addr].state = closed(nodes[addr].state);
+                nodes[addr].free_next.store(curr_head.addr, mo::lax);
             } while (!head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::lax));
         }
 
