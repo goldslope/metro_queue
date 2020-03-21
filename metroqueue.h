@@ -26,7 +26,7 @@ template <typename T,
           bool relaxed_node_load = false,
           typename Alloc = std::allocator<void>>
 class MetroQueuePtr {
-    
+
     using QueueType = MetroQueue<T,
                                  single_producer,
                                  single_consumer,
@@ -77,7 +77,7 @@ template <typename T,
           typename,
           typename>
 class MetroQueue {
-    
+
     typedef uint32_t address_t;
     typedef uint32_t state_t;
 
@@ -91,10 +91,6 @@ class MetroQueue {
 public:
     class NodeRef {
     public:
-        //TODO: put the following in the right areas
-        //enum : bool enabled_or_disabled {enabled = true, disabled = false};
-        //MetroQueue::NodeRef::enabled_or_disabled node_ref_usage = MetroQueue::NodeRef::disabled,
-
         explicit NodeRef(QueuePtrType const& q) noexcept : q_ptr{q}, addr{null_addr}, cnt{0} {}
         ~NodeRef() {release();}
 
@@ -354,7 +350,7 @@ private:
     static constexpr void pop_item(U&& v, T& item) noexcept {
         std::forward<U>(v) = std::is_nothrow_assignable<U, T&&>::value ? std::move(item) : item;
     }
-    
+
     template <typename U>
     bool try_push_sp(U&& v) noexcept {
         auto curr_tail = tail_.load(mo::lax);
@@ -441,7 +437,7 @@ private:
             auto const slot_offset = curr_head.addr * slots_per_node_;
             auto const deq_idx = node.deq_idx.load(mo::lax);
             auto const enq_idx = node.enq_idx.load(single_producer ? mo::acq : mo::lax);
-            if (deq_idx < enq_idx) {
+            if (deq_idx < enq_idx && deq_idx < slots_per_node_) {
                 // slot acquired, try pushing to slot
                 auto& slot = slots_[slot_offset + deq_idx];
                 auto const popped = pop_from_slot(v, slot, curr_head, ref);
@@ -732,8 +728,9 @@ private:
     template <bool sc = single_consumer, std::enable_if_t<!sc, int> = 0>
     void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
         auto& node = nodes_[addr];
+        auto const zero_ref_cnt = single_producer && !node_ref_ok;
         auto const sub_memory_order = node_ref_ok ? mo::acq_rls : mo::lax;
-        if (single_producer || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, sub_memory_order)) {
+        if (zero_ref_cnt || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, sub_memory_order)) {
             if (!node_ref_ok) {
                 // wait for all slots to be closed
                 auto const slot_offset = addr * slots_per_node_;
