@@ -638,7 +638,11 @@ private:
 
         // allocation succeeded, prepare new node to be added
         auto& alloc_node = nodes_[alloc_addr];
-        alloc_node.reset();
+        if (node_ref_ok) {
+            alloc_node.reset(refs_per_node());
+        } else {
+            alloc_node.reset();
+        }
 
         // append new node to end of the queue
         TaggedPtr alloc_ptr = {alloc_addr, alloc_node.state};
@@ -751,7 +755,7 @@ private:
 
     constexpr auto refs_per_node() const noexcept {
         // head_, tail_, back_ = 3 pointers
-        auto const num_ptrs = single_producer ? 0 : 3;
+        auto const num_ptrs = single_producer ? 1 : 3;
         return node_ref_ok ? slots_per_node_ + num_ptrs : num_ptrs;
     }
 
