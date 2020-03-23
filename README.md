@@ -4,7 +4,7 @@
 Currently passes basic single-threaded queue correctness tests.
 
 ## What is it?
-MetroQueue is an almost lock-free queue (see `Progress Guarantees`).
+MetroQueue is an almost lock-free queue (see **Progress Guarantees**).
 By default, it is a multi-producer, multi-consumer queue. However,
 it can optimized for single-producer and/or single-consumer cases
 via template parameters.
