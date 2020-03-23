@@ -161,7 +161,9 @@ public:
     MetroQueue(typename QueuePtrType::Key const&,
                size_t queue_capacity,
                size_t node_capacity,
-               Alloc const& alloc) : alloc_{alloc} {
+               Alloc const& alloc) :
+        node_alloc_{alloc},
+        slot_alloc_{alloc} {
 
         size_t const min_node_capacity = 1;
         node_capacity = std::max(node_capacity, min_node_capacity);
@@ -177,21 +179,17 @@ public:
         slots_per_node_ = round_divide(queue_capacity, num_nodes_);
         slots_per_node_ = std::max(slots_per_node_, node_capacity);
 
-        // setup allocators
-        NodeAlloc node_alloc{alloc_};
-        SlotAlloc slot_alloc{alloc_};
-
         // allocate and initialize nodes
-        nodes_ = std::allocator_traits<NodeAlloc>::allocate(node_alloc, num_nodes_);
+        nodes_ = std::allocator_traits<NodeAlloc>::allocate(node_alloc_, num_nodes_);
         for (size_t i = 0; i < num_nodes_; ++i) {
-            std::allocator_traits<NodeAlloc>::construct(node_alloc, &nodes_[i], refs_per_node());
+            std::allocator_traits<NodeAlloc>::construct(node_alloc_, &nodes_[i], refs_per_node());
         }
 
         // allocate and initialize slots
         auto const num_slots = num_nodes_ * slots_per_node_;
-        slots_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc, num_slots);
+        slots_ = std::allocator_traits<SlotAlloc>::allocate(slot_alloc_, num_slots);
         for (size_t i = 0; i < num_slots; ++i) {
-            std::allocator_traits<SlotAlloc>::construct(slot_alloc, &slots_[i]);
+            std::allocator_traits<SlotAlloc>::construct(slot_alloc_, &slots_[i]);
         }
 
         // setup free-list
@@ -208,22 +206,18 @@ public:
     }
 
     ~MetroQueue() {
-        // setup allocators
-        NodeAlloc node_alloc{alloc_};
-        SlotAlloc slot_alloc{alloc_};
-
         // destroy and deallocate nodes
         for (size_t i = 0; i < num_nodes_; ++i) {
-            std::allocator_traits<NodeAlloc>::destroy(node_alloc, &nodes_[i]);
+            std::allocator_traits<NodeAlloc>::destroy(node_alloc_, &nodes_[i]);
         }
-        std::allocator_traits<NodeAlloc>::deallocate(node_alloc, nodes_, num_nodes_);
+        std::allocator_traits<NodeAlloc>::deallocate(node_alloc_, nodes_, num_nodes_);
 
         // destroy and deallocate slots
         auto const num_slots = num_nodes_ * slots_per_node_;
         for (size_t i = 0; i < num_slots; ++i) {
-            std::allocator_traits<SlotAlloc>::destroy(slot_alloc, &slots_[i]);
+            std::allocator_traits<SlotAlloc>::destroy(slot_alloc_, &slots_[i]);
         }
-        std::allocator_traits<SlotAlloc>::deallocate(slot_alloc, slots_, num_slots);
+        std::allocator_traits<SlotAlloc>::deallocate(slot_alloc_, slots_, num_slots);
     }
 
 private:
@@ -835,6 +829,8 @@ private:
     };
 
     Alloc const alloc_;
+    NodeAlloc node_alloc_;
+    SlotAlloc slot_alloc_;
     size_t num_nodes_; // constant after construction
     size_t slots_per_node_; // constant after construction
     Node* nodes_; // constant after construction
