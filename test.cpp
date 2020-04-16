@@ -64,22 +64,12 @@ int main() {
     MetroQueuePtr<int, true, false, true> spmc_nr = MetroQueuePtr<int, true, false, true>(capacity, node_sz); 
     MetroQueuePtr<int, false, false, true> mpmc_nr = MetroQueuePtr<int, false, false, true>(capacity, node_sz); 
 
-    MetroQueuePtr<int, true, false, true, true> spmc_nr_rlx = MetroQueuePtr<int, true, false, true, true>(capacity, node_sz); 
-    MetroQueuePtr<int, false, false, true, true> mpmc_nr_rlx = MetroQueuePtr<int, false, false, true, true>(capacity, node_sz); 
-
-    MetroQueuePtr<int, false, true, false, true> mpsc_rlx = MetroQueuePtr<int, false, true, false, true>(capacity, node_sz); 
-    MetroQueuePtr<int, false, false, false, true> mpmc_rlx = MetroQueuePtr<int, false, false, false, true>(capacity, node_sz); 
-
     test_single_thread(spsc, capacity, node_sz);
     test_single_thread(spmc, capacity, node_sz);
     test_single_thread(mpsc, capacity, node_sz);
     test_single_thread(mpmc, capacity, node_sz);
     test_single_thread(spmc_nr, capacity, node_sz);
     test_single_thread(mpmc_nr, capacity, node_sz);
-    test_single_thread(spmc_nr_rlx, capacity, node_sz);
-    test_single_thread(mpmc_nr_rlx, capacity, node_sz);
-    test_single_thread(mpsc_rlx, capacity, node_sz);
-    test_single_thread(mpmc_rlx, capacity, node_sz);
 
     return 0;
 }

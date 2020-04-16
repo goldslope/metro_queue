@@ -16,4 +16,4 @@ test: $(OBJS)
 test.o: $(SRCS)
 
 clean:
-	$(RM) $(OBJS)
+	$(RM) $(OBJS) test

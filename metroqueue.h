@@ -5,25 +5,25 @@
 #include <memory>
 #include <type_traits>
 
+#ifndef METROQUEUE_RELAXED_NODE_LOAD
+    #define METROQUEUE_RELAXED_NODE_LOAD false
+#endif
+
+
 using std::size_t;
 
 template <typename,
           bool single_producer,
           bool single_consumer,
           bool node_ref_ok,
-          bool relaxed_node_load,
           typename,
-          typename = std::enable_if_t<!single_consumer || !node_ref_ok>,
-          typename = std::enable_if_t<!relaxed_node_load ||
-                                      !single_producer ||
-                                      node_ref_ok>>
+          typename = std::enable_if_t<!single_consumer || !node_ref_ok>>
 class MetroQueue;
 
 template <typename T,
           bool single_producer = false,
           bool single_consumer = false,
           bool node_ref_ok = false,
-          bool relaxed_node_load = false,
           typename Alloc = std::allocator<void>>
 class MetroQueuePtr {
 
@@ -31,7 +31,6 @@ class MetroQueuePtr {
                                  single_producer,
                                  single_consumer,
                                  node_ref_ok,
-                                 relaxed_node_load,
                                  Alloc>;
 
 private:
@@ -65,16 +64,14 @@ private:
 
     std::shared_ptr<QueueType> const q_ptr; // single const member -> immutable
 
-    friend class MetroQueue<T, single_producer, single_consumer, node_ref_ok, relaxed_node_load, Alloc>;
+    friend class MetroQueue<T, single_producer, single_consumer, node_ref_ok, Alloc>;
 };
 
 template <typename T,
           bool single_producer,
           bool single_consumer,
           bool node_ref_ok,
-          bool relaxed_node_load,
           typename Alloc,
-          typename,
           typename>
 class MetroQueue {
 
@@ -85,7 +82,6 @@ class MetroQueue {
                                        single_producer,
                                        single_consumer,
                                        node_ref_ok,
-                                       relaxed_node_load,
                                        Alloc>;
 
 public:
@@ -379,9 +375,8 @@ private:
     template <typename Iter>
     size_t try_push_mp(Iter it, size_t const item_cnt) noexcept {
         size_t push_cnt = 0;
-        auto curr_tail = tail_.load(relaxed_node_load ? mo::lax : mo::csm);
+        auto curr_tail = tail_.load(METROQUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
         TmpNodeRef<node_ref_ok> ref = {this, curr_tail.addr};
-        bool retry = true; // only for relaxed_node_load
 
         for (;;) {
             auto& node = nodes_[curr_tail.addr];
@@ -400,12 +395,6 @@ private:
                 if (push_cnt > 0) {
                     break;
                 }
-            }
-
-            if (relaxed_node_load && retry) {
-                retry = false;
-                curr_tail = tail_.load(mo::csm);
-                continue;
             }
 
             if (enq_idx >= slots_per_node_ && !get_next_tail(curr_tail)) {
@@ -451,17 +440,12 @@ private:
     template <typename Iter, typename NodeRefType>
     bool try_pop_mc(Iter it, size_t const item_cnt, NodeRefType&& ref) noexcept {
         size_t pop_cnt = 0;
-        auto curr_head = head_.load(relaxed_node_load && node_ref_ok ? mo::lax : mo::csm);
+        auto curr_head = head_.load(METROQUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
 
         for (;;) {
-            if (node_ref_ok) {
-                if (relaxed_node_load && (ref.cnt == 0 || ref.addr != curr_head.addr)) {
-                    curr_head = head_.load(mo::csm); // reload unrelaxed here
-                }
-                if (ref.addr != curr_head.addr) {
-                    ref.release();
-                    ref.addr = curr_head.addr;
-                }
+            if (node_ref_ok && ref.addr != curr_head.addr) {
+                ref.release();
+                ref.addr = curr_head.addr;
             }
 
             auto& node = nodes_[curr_head.addr];
@@ -844,6 +828,5 @@ private:
                          single_producer,
                          single_consumer,
                          node_ref_ok,
-                         relaxed_node_load,
                          Alloc>::MetroQueuePtr(size_t, size_t, Alloc const&);
 };
