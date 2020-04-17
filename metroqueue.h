@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <new>
 #include <type_traits>
 
 #ifndef METROQUEUE_RELAXED_NODE_LOAD
@@ -58,9 +59,9 @@ private:
 
     // disable heap allocation
     void* operator new(size_t) = delete;
-    void* operator new(size_t, std::align_val_t) = delete;
+    void* operator new[](size_t) = delete;
     void operator delete(void*) = delete;
-    void operator delete(void*, std::align_val_t) = delete;
+    void operator delete[](void*) = delete;
 
     std::shared_ptr<QueueType> const q_ptr; // single const member -> immutable
 
@@ -102,9 +103,9 @@ public:
 
         // disable heap allocation
         void* operator new(size_t) = delete;
-        void* operator new(size_t, std::align_val_t) = delete;
+        void* operator new[](size_t) = delete;
         void operator delete(void*) = delete;
-        void operator delete(void*, std::align_val_t) = delete;
+        void operator delete[](void*) = delete;
 
     private:
         QueuePtrType const q_ptr; // const member -> non-assignable
@@ -121,12 +122,8 @@ private:
         TmpNodeRef(MetroQueue* const q, address_t a) noexcept : q_ptr{q}, addr{a}, cnt{0} {}
         ~TmpNodeRef() {release();}
 
-        template <bool fake_ref = !enabled, typename = std::enable_if_t<fake_ref>>
-        constexpr void release() const noexcept {}
-
-        template <bool real_ref = enabled, typename = std::enable_if_t<real_ref>>
         void release() noexcept {
-            if (cnt > 0 && addr != null_addr) {
+            if (enabled && cnt > 0 && addr != null_addr) {
                 q_ptr->remove_node_reference(addr, cnt);
                 cnt = 0;
             }
@@ -336,9 +333,17 @@ private:
         return pushed(s) + (!single_consumer && !node_ref_ok);
     }
 
-    template <typename U>
+    template <typename U,
+              bool moveable = std::is_nothrow_assignable<U, T&&>::value,
+              std::enable_if_t<moveable, int> = 0>
     static constexpr void pop_item(U&& v, T& item) noexcept {
-        std::forward<U>(v) = std::is_nothrow_assignable<U, T&&>::value ? std::move(item) : item;
+        std::forward<U>(v) = std::move(item);
+    }
+    template <typename U,
+              bool moveable = std::is_nothrow_assignable<U, T&&>::value,
+              std::enable_if_t<!moveable, int> = 0>
+    static constexpr void pop_item(U&& v, T& item) noexcept {
+        std::forward<U>(v) = item;
     }
 
     template <typename U>
