@@ -36,7 +36,7 @@ class MetroQueuePtr {
 
 private:
     struct Key {
-        explicit Key(int) {}
+        explicit Key(int) noexcept {}
     };
 
 public:
@@ -216,16 +216,16 @@ public:
 private:
     template <typename U>
     static constexpr auto is_valid_pop_value =
-        std::is_nothrow_assignable<U, T&>::value || std::is_nothrow_assignable<U, T&&>::value;
+        std::is_nothrow_assignable_v<U, T&> || std::is_nothrow_assignable_v<U, T&&>;
 
     template <typename U>
     static constexpr auto is_valid_push_value =
-        std::is_nothrow_assignable<T&, U>::value && (single_consumer || is_valid_pop_value<U>);
+        std::is_nothrow_assignable_v<T&, U> && (single_consumer || is_valid_pop_value<U>);
 
     template <typename Iter>
     static constexpr auto is_valid_base_iterator =
-        std::is_same<typename std::iterator_traits<Iter>::iterator_category,
-                     std::random_access_iterator_tag>::value;
+        std::is_same_v<typename std::iterator_traits<Iter>::iterator_category,
+                       std::random_access_iterator_tag>;
 
     template <typename Iter>
     static constexpr auto is_valid_push_iterator =
@@ -314,7 +314,7 @@ private:
 #ifdef __cpp_lib_hardware_interference_size
     static constexpr auto no_false_sharing_alignment = std::hardware_destructive_interference_size;
 #else
-    static constexpr auto no_false_sharing_alignment = 128;
+    static constexpr auto no_false_sharing_alignment = 64;
 #endif
     static constexpr auto null_addr = std::numeric_limits<address_t>::max();
     static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
@@ -333,17 +333,13 @@ private:
         return pushed(s) + (!single_consumer && !node_ref_ok);
     }
 
-    template <typename U,
-              bool moveable = std::is_nothrow_assignable<U, T&&>::value,
-              std::enable_if_t<moveable, int> = 0>
+    template <typename U>
     static constexpr void pop_item(U&& v, T& item) noexcept {
-        std::forward<U>(v) = std::move(item);
-    }
-    template <typename U,
-              bool moveable = std::is_nothrow_assignable<U, T&&>::value,
-              std::enable_if_t<!moveable, int> = 0>
-    static constexpr void pop_item(U&& v, T& item) noexcept {
-        std::forward<U>(v) = item;
+        if constexpr(std::is_nothrow_assignable_v<U, T&&>) {
+            std::forward<U>(v) = std::move(item);
+        } else {
+            std::forward<U>(v) = item;
+        }
     }
 
     template <typename U>
@@ -512,7 +508,7 @@ private:
     }
 
     template <typename U, bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
-    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>& ref) noexcept {
+    bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>&) noexcept {
         auto const s = nodes_[ptr.addr].state;
         if (!single_producer && s != ptr.state) {
             // producer ABA occurred, invalidate slot
@@ -756,7 +752,7 @@ private:
     };
 
     struct Node {
-        Node(size_t const init_ref_cnt) : ref_cnt{init_ref_cnt} {next = {null_addr, 0};}
+        Node(size_t const init_ref_cnt) noexcept : ref_cnt{init_ref_cnt} {next = {null_addr, 0};}
 
         void reset(size_t const init_ref_cnt) noexcept {
             ref_cnt.store(init_ref_cnt, mo::lax);
@@ -817,7 +813,6 @@ private:
         std::atomic<TaggedPtr> head;
     };
 
-    Alloc const alloc_;
     NodeAlloc node_alloc_;
     SlotAlloc slot_alloc_;
     size_t num_nodes_; // constant after construction
