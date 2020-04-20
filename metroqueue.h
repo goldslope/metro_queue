@@ -11,28 +11,26 @@
 #endif
 
 
+namespace metro {
+
 using std::size_t;
 
 template <typename,
+          typename,
           bool single_producer,
           bool single_consumer,
           bool node_ref_ok,
-          typename,
           typename = std::enable_if_t<!single_consumer || !node_ref_ok>>
-class MetroQueue;
+class Queue;
 
 template <typename T,
-          bool single_producer = false,
-          bool single_consumer = false,
-          bool node_ref_ok = false,
-          typename Alloc = std::allocator<void>>
-class MetroQueuePtr {
+          typename Alloc,
+          bool single_producer,
+          bool single_consumer,
+          bool node_ref_ok>
+class QueuePtr {
 
-    using QueueType = MetroQueue<T,
-                                 single_producer,
-                                 single_consumer,
-                                 node_ref_ok,
-                                 Alloc>;
+    using QueueType = Queue<T, Alloc, single_producer, single_consumer, node_ref_ok>;
 
 private:
     struct Key {
@@ -40,19 +38,17 @@ private:
     };
 
 public:
-    MetroQueuePtr(size_t queue_capacity,
-                  size_t node_capacity,
-                  Alloc const& alloc = std::allocator<void>{}) :
-        q_ptr{std::allocate_shared<QueueType>(alloc,
-                                              Key{0},
-                                              queue_capacity,
-                                              node_capacity,
-                                              alloc)} {}
+    QueuePtr(size_t queue_capacity, size_t node_capacity, Alloc const& alloc = Alloc{})
+        : q_ptr{std::allocate_shared<QueueType>(alloc,
+                                                Key{0},
+                                                queue_capacity,
+                                                node_capacity,
+                                                alloc)} {}
 
     std::shared_ptr<QueueType> const& operator->() const noexcept {return q_ptr;}
 
-    bool operator==(MetroQueuePtr const& other) const noexcept {return q_ptr == other.q_ptr;}
-    bool operator!=(MetroQueuePtr const& other) const noexcept {return q_ptr != other.q_ptr;}
+    bool operator==(QueuePtr const& other) const noexcept {return q_ptr == other.q_ptr;}
+    bool operator!=(QueuePtr const& other) const noexcept {return q_ptr != other.q_ptr;}
 
 private:
     QueueType* const get() const noexcept {return q_ptr.get();}
@@ -65,25 +61,39 @@ private:
 
     std::shared_ptr<QueueType> const q_ptr; // single const member -> immutable
 
-    friend class MetroQueue<T, single_producer, single_consumer, node_ref_ok, Alloc>;
+    friend class Queue<T, Alloc, single_producer, single_consumer, node_ref_ok>;
 };
 
+template <typename T, typename Alloc = std::allocator<void>>
+using MPMCQueuePtr = QueuePtr<T, Alloc, false, false, false>;
+
+template <typename T, typename Alloc = std::allocator<void>>
+using SPMCQueuePtr = QueuePtr<T, Alloc, true, false, false>;
+
+template <typename T, typename Alloc = std::allocator<void>>
+using MPSCQueuePtr = QueuePtr<T, Alloc, false, true, false>;
+
+template <typename T, typename Alloc = std::allocator<void>>
+using SPSCQueuePtr = QueuePtr<T, Alloc, true, true, false>;
+
+template <typename T, typename Alloc = std::allocator<void>>
+using MPMCRefQueuePtr = QueuePtr<T, Alloc, false, false, true>;
+
+template <typename T, typename Alloc = std::allocator<void>>
+using SPMCRefQueuePtr = QueuePtr<T, Alloc, true, false, true>;
+
 template <typename T,
+          typename Alloc,
           bool single_producer,
           bool single_consumer,
           bool node_ref_ok,
-          typename Alloc,
           typename>
-class MetroQueue {
+class Queue {
 
     typedef uint32_t address_t;
     typedef uint32_t state_t;
 
-    using QueuePtrType = MetroQueuePtr<T,
-                                       single_producer,
-                                       single_consumer,
-                                       node_ref_ok,
-                                       Alloc>;
+    using QueuePtrType = QueuePtr<T, Alloc, single_producer, single_consumer, node_ref_ok>;
 
 public:
     class NodeRef {
@@ -112,14 +122,14 @@ public:
         address_t addr;
         size_t cnt;
 
-        friend class MetroQueue;
+        friend class Queue;
     };
 
 private:
     template <bool enabled>
     struct TmpNodeRef {
-        TmpNodeRef(MetroQueue* const q) noexcept : q_ptr{q}, addr{null_addr}, cnt{0} {}
-        TmpNodeRef(MetroQueue* const q, address_t a) noexcept : q_ptr{q}, addr{a}, cnt{0} {}
+        TmpNodeRef(Queue* const q) noexcept : q_ptr{q}, addr{null_addr}, cnt{0} {}
+        TmpNodeRef(Queue* const q, address_t a) noexcept : q_ptr{q}, addr{a}, cnt{0} {}
         ~TmpNodeRef() {release();}
 
         void release() noexcept {
@@ -129,7 +139,7 @@ private:
             }
         }
 
-        MetroQueue* const q_ptr;
+        Queue* const q_ptr;
         address_t addr;
         size_t cnt;
     };
@@ -151,12 +161,11 @@ private:
     using SlotAlloc = typename std::allocator_traits<Alloc>::template rebind_alloc<Slot>;
 
 public:
-    MetroQueue(typename QueuePtrType::Key const&,
-               size_t queue_capacity,
-               size_t node_capacity,
-               Alloc const& alloc) :
-        node_alloc_{alloc},
-        slot_alloc_{alloc} {
+    Queue(typename QueuePtrType::Key const&,
+          size_t queue_capacity,
+          size_t node_capacity,
+          Alloc const& alloc)
+        : node_alloc_{alloc}, slot_alloc_{alloc} {
 
         size_t const min_node_capacity = 1;
         node_capacity = std::max(node_capacity, min_node_capacity);
@@ -198,7 +207,7 @@ public:
         back_ = {init_addr, 0};
     }
 
-    ~MetroQueue() {
+    ~Queue() {
         // destroy and deallocate nodes
         for (size_t i = 0; i < num_nodes_; ++i) {
             std::allocator_traits<NodeAlloc>::destroy(node_alloc_, &nodes_[i]);
@@ -824,9 +833,8 @@ private:
     alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> tail_;
     alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> back_;
 
-    friend MetroQueuePtr<T,
-                         single_producer,
-                         single_consumer,
-                         node_ref_ok,
-                         Alloc>::MetroQueuePtr(size_t, size_t, Alloc const&);
+    friend QueuePtr<T, Alloc, single_producer, single_consumer, node_ref_ok>
+        ::QueuePtr(size_t, size_t, Alloc const&);
 };
+
+}
