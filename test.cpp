@@ -56,13 +56,13 @@ int main() {
     auto capacity = 20;
     auto node_sz = 5;
 
-    MetroQueuePtr<int, true, true> spsc = MetroQueuePtr<int, true, true>(capacity, node_sz); 
-    MetroQueuePtr<int, true, false> spmc = MetroQueuePtr<int, true, false>(capacity, node_sz); 
-    MetroQueuePtr<int, false, true> mpsc = MetroQueuePtr<int, false, true>(capacity, node_sz); 
-    MetroQueuePtr<int, false, false> mpmc = MetroQueuePtr<int, false, false>(capacity, node_sz); 
+    metro::SPSCQueuePtr<int> spsc = metro::SPSCQueuePtr<int>(capacity, node_sz);
+    metro::SPMCQueuePtr<int> spmc = metro::SPMCQueuePtr<int>(capacity, node_sz);
+    metro::MPSCQueuePtr<int> mpsc = metro::MPSCQueuePtr<int>(capacity, node_sz);
+    metro::MPMCQueuePtr<int> mpmc = metro::MPMCQueuePtr<int>(capacity, node_sz);
 
-    MetroQueuePtr<int, true, false, true> spmc_nr = MetroQueuePtr<int, true, false, true>(capacity, node_sz); 
-    MetroQueuePtr<int, false, false, true> mpmc_nr = MetroQueuePtr<int, false, false, true>(capacity, node_sz); 
+    metro::SPMCRefQueuePtr<int> spmc_nr = metro::SPMCRefQueuePtr<int>(capacity, node_sz);
+    metro::MPMCRefQueuePtr<int> mpmc_nr = metro::MPMCRefQueuePtr<int>(capacity, node_sz);
 
     test_single_thread(spsc, capacity, node_sz);
     test_single_thread(spmc, capacity, node_sz);
