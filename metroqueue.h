@@ -465,7 +465,7 @@ private:
             enq_idx = node.enq_idx.load(mo::lax);
             while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
                 auto const new_idx = deq_idx + std::min(item_cnt, enq_idx - deq_idx);
-                if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
+                if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq_rls, mo::acq)) {
                     do {
                         // slot acquired, try popping from slot
                         auto& slot = slots_[slot_offset + deq_idx];
@@ -492,7 +492,7 @@ private:
             }
 
             // producers have filled the block, attempt dequeue optimistically
-            deq_idx = node.deq_idx.fetch_add(item_cnt, mo::acq);
+            deq_idx = node.deq_idx.fetch_add(item_cnt, mo::acq_rls);
             if (deq_idx < slots_per_node_) {
                 auto slot_cnt = item_cnt;
                 do {
