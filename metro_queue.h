@@ -321,9 +321,9 @@ private:
     };
 
 #ifdef __cpp_lib_hardware_interference_size
-    static constexpr auto no_false_sharing_alignment = std::hardware_destructive_interference_size;
+    static constexpr auto interference_size = std::hardware_destructive_interference_size;
 #else
-    static constexpr auto no_false_sharing_alignment = 64;
+    static constexpr auto interference_size = 64;
 #endif
     static constexpr auto null_addr = std::numeric_limits<address_t>::max();
     static constexpr auto round_divide(size_t const a, size_t const b) noexcept {
@@ -755,7 +755,7 @@ private:
         bool operator!=(TaggedPtr const& other) const noexcept {return addr != other.addr || state != other.state;}
     };
 
-    struct alignas(no_false_sharing_alignment) Slot {
+    struct alignas(interference_size) Slot {
         T item;
         std::atomic<state_t> state = {0};
     };
@@ -774,12 +774,12 @@ private:
             next.store({null_addr, state}, mo::lax); // not included in synchronization
         }
 
-        alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> next;
-        alignas(no_false_sharing_alignment) std::atomic<address_t> free_next = {null_addr};
+        alignas(interference_size) std::atomic<TaggedPtr> next;
+        alignas(interference_size) std::atomic<address_t> free_next = {null_addr};
         state_t state = 0;
-        alignas(no_false_sharing_alignment) std::atomic<size_t> enq_idx = {0};
-        alignas(no_false_sharing_alignment) std::atomic<size_t> deq_idx = {0};
-        alignas(no_false_sharing_alignment) std::atomic<size_t> ref_cnt;
+        alignas(interference_size) std::atomic<size_t> enq_idx = {0};
+        alignas(interference_size) std::atomic<size_t> deq_idx = {0};
+        alignas(interference_size) std::atomic<size_t> ref_cnt;
     };
 
     struct FreeList {
@@ -828,10 +828,10 @@ private:
     size_t slots_per_node_; // constant after construction
     Node* nodes_; // constant after construction
     Slot* slots_; // constant after construction
-    alignas(no_false_sharing_alignment) FreeList free_list_;
-    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> head_;
-    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> tail_;
-    alignas(no_false_sharing_alignment) std::atomic<TaggedPtr> back_;
+    alignas(interference_size) FreeList free_list_;
+    alignas(interference_size) std::atomic<TaggedPtr> head_;
+    alignas(interference_size) std::atomic<TaggedPtr> tail_;
+    alignas(interference_size) std::atomic<TaggedPtr> back_;
 
     friend QueuePtr<T, Alloc, single_producer, single_consumer, node_ref_ok>
         ::QueuePtr(size_t, size_t, Alloc const&);
