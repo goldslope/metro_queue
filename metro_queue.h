@@ -6,8 +6,8 @@
 #include <new>
 #include <type_traits>
 
-#ifndef METROQUEUE_RELAXED_NODE_LOAD
-    #define METROQUEUE_RELAXED_NODE_LOAD false
+#ifndef METRO_QUEUE_RELAXED_NODE_LOAD
+    #define METRO_QUEUE_RELAXED_NODE_LOAD false
 #endif
 
 
@@ -385,7 +385,7 @@ private:
     template <typename Iter>
     size_t try_push_mp(Iter it, size_t const item_cnt) noexcept {
         size_t push_cnt = 0;
-        auto curr_tail = tail_.load(METROQUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
+        auto curr_tail = tail_.load(METRO_QUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
         TmpNodeRef<node_ref_ok> ref = {this, curr_tail.addr};
 
         for (;;) {
@@ -450,7 +450,7 @@ private:
     template <typename Iter, typename NodeRefType>
     bool try_pop_mc(Iter it, size_t const item_cnt, NodeRefType&& ref) noexcept {
         size_t pop_cnt = 0;
-        auto curr_head = head_.load(METROQUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
+        auto curr_head = head_.load(METRO_QUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
 
         for (;;) {
             if (node_ref_ok && ref.addr != curr_head.addr) {
