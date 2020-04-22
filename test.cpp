@@ -1,6 +1,6 @@
 #include <cassert>
 #include <iostream>
-#include "metroqueue.h"
+#include "metro_queue.h"
 
 template <typename QueuePtr>
 void test_single_thread(QueuePtr& q, size_t capacity, size_t node_sz) {
