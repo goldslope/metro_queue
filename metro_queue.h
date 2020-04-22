@@ -364,7 +364,7 @@ private:
                 // slot acquired, try pushing to slot
                 auto& slot = slots_[slot_offset + enq_idx];
                 auto const pushed = push_to_slot(v, slot, curr_tail, ref);
-                node.enq_idx.store(enq_idx + 1, single_consumer ? mo::rls : mo::lax);
+                node.enq_idx.store(enq_idx + 1, mo::rls);
 
                 if (pushed) {
                     break;
@@ -404,6 +404,10 @@ private:
 
                 if (push_cnt > 0) {
                     break;
+                } else {
+                    // unsuccessful pushes, possibly due to ABA, reload and try again
+                    curr_tail = tail_.load(mo::csm);
+                    continue;
                 }
             }
 
@@ -453,6 +457,7 @@ private:
         auto curr_head = head_.load(METRO_QUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
 
         for (;;) {
+            begin_loop:
             if (node_ref_ok && ref.addr != curr_head.addr) {
                 ref.release();
                 ref.addr = curr_head.addr;
@@ -475,20 +480,32 @@ private:
                     } while (++deq_idx < new_idx);
 
                     if (pop_cnt > 0) {
-                        return pop_cnt;
+                        goto exit;
+                    } else {
+                        // unsuccessful pops, possibly due to ABA, reload and try again
+                        curr_head = head_.load(mo::csm);
+                        goto begin_loop;
                     }
                 }
                 enq_idx = node.enq_idx.load(mo::lax);
             }
 
             if (deq_idx >= enq_idx) {
-                auto const prev_head = curr_head;
-                curr_head = head_.load(mo::csm);
-                if (prev_head == curr_head) {
-                    break; // empty
+                if (deq_idx >= slots_per_node_) {
+                    if (!get_next_head(curr_head)) {
+                        break; // empty
+                    }
                 } else {
-                    continue;
+                    enq_idx = node.enq_idx.load(mo::acq); // reload with acquire
+                    if (deq_idx >= enq_idx) {
+                        auto const prev_head = curr_head;
+                        curr_head = head_.load(mo::csm);
+                        if (prev_head == curr_head) {
+                            break; // empty
+                        }
+                    }
                 }
+                continue;
             }
 
             // producers have filled the block, attempt dequeue optimistically
@@ -505,6 +522,10 @@ private:
 
                 if (pop_cnt > 0) {
                     break;
+                } else {
+                    // unsuccessful pops, possibly due to ABA, reload and try again
+                    curr_head = head_.load(mo::csm);
+                    continue;
                 }
             }
 
@@ -513,6 +534,7 @@ private:
             }
         }
 
+        exit:
         return pop_cnt;
     }
 
@@ -689,8 +711,7 @@ private:
 
     template <bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
     bool get_next_head(TaggedPtr& curr_head) noexcept {
-        auto const& next_ptr = nodes_[curr_head.addr].next;
-        auto const curr_next = next_ptr.load(mo::csm);
+        auto const curr_next = nodes_[curr_head.addr].next.load(mo::csm);
         TaggedPtr const null_ptr = {null_addr, curr_head.state};
         if (curr_next == null_ptr) {
             return false;
