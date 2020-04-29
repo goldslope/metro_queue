@@ -830,7 +830,7 @@ private:
             while (curr_head.addr != null_addr) {
                 new_head.addr = nodes[curr_head.addr].free_next.load(mo::lax);
                 new_head.state = curr_head.state + 1;
-                if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::csm)) {
+                if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::acq)) {
                     break; // success!
                 } else if (q_tail_check && q_tail_node.next.load(mo::lax) != null_ptr) {
                     q_tail.addr = null_addr; // indicate allocation is no longer needed
