@@ -673,9 +673,10 @@ private:
         }
 
         // no more nodes in the queue, attempt to allocate
-        auto const alloc_addr = free_list_.try_alloc(nodes_, curr_tail);
-        if (curr_tail.addr == null_addr) {
-            curr_tail = tail_.load(mo::csm);
+        bool tail_appended = false;
+        auto const alloc_addr = free_list_.try_alloc(nodes_, curr_tail, tail_appended);
+        if (tail_appended) {
+            advance_ptr(tail_, curr_tail);
             return true;
         } else if (alloc_addr == null_addr) {
             return false; // free-list is empty
@@ -815,14 +816,14 @@ private:
         }
 
         address_t try_alloc(Node* nodes) noexcept {
-            TaggedPtr null_ptr = {null_addr, 0};
-            return try_alloc<false>(nodes, null_ptr);
+            bool unused;
+            return try_alloc<false>(nodes, {null_addr, 0}, unused);
         }
 
         template <bool q_tail_check=true>
-        address_t try_alloc(Node* nodes, TaggedPtr& q_tail) noexcept {
+        address_t try_alloc(Node* nodes, TaggedPtr const q_tail, bool& q_tail_appended) noexcept {
             auto const& q_tail_node = nodes[q_tail.addr];
-            auto curr_head = head.load(mo::csm);
+            auto curr_head = head.load(mo::acq);
             TaggedPtr const null_ptr = {null_addr, q_tail.state};
             TaggedPtr new_head;
  
@@ -833,7 +834,7 @@ private:
                 if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::acq)) {
                     break; // success!
                 } else if (q_tail_check && q_tail_node.next.load(mo::lax) != null_ptr) {
-                    q_tail.addr = null_addr; // indicate allocation is no longer needed
+                    q_tail_appended = true; // another producer already appended to queue tail
                     break;
                 }
             }
