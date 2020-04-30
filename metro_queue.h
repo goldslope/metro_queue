@@ -496,10 +496,10 @@ private:
                         break; // empty
                     }
                 } else {
-                    auto const new_deq_idx = node.deq_idx.load(mo::acq);
+                    enq_idx = node.enq_idx.load(mo::acq);
                     auto const prev_head = curr_head;
                     curr_head = head_.load(mo::csm);
-                    if (deq_idx == new_deq_idx && prev_head == curr_head) {
+                    if (deq_idx >= enq_idx && prev_head == curr_head) {
                         break; // empty
                     }
                 }
@@ -789,9 +789,10 @@ private:
         }
 
         void reset() noexcept {
-            enq_idx.store(0, mo::rls); // release to synchronize with producers
-            deq_idx.store(0, mo::rls); // release to synchronize with consumers
-            next.store({null_addr, state}, mo::lax); // not included in synchronization
+            std::atomic_thread_fence(mo::rls);
+            enq_idx.store(0, mo::lax);
+            deq_idx.store(0, mo::lax);
+            next.store({null_addr, state}, mo::lax);
         }
 
         alignas(interference_size) std::atomic<TaggedPtr> next;
