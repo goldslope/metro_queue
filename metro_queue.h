@@ -364,7 +364,7 @@ private:
                 // slot acquired, try pushing to slot
                 auto& slot = slots_[slot_offset + enq_idx];
                 auto const pushed = push_to_slot(v, slot, curr_tail, ref);
-                node.enq_idx.store(enq_idx + 1, mo::rls);
+                node.enq_idx.store(enq_idx + 1, single_consumer ? mo::rls : mo::lax);
 
                 if (pushed) {
                     break;
@@ -496,13 +496,11 @@ private:
                         break; // empty
                     }
                 } else {
-                    enq_idx = node.enq_idx.load(mo::acq); // reload with acquire
-                    if (deq_idx >= enq_idx) {
-                        auto const prev_head = curr_head;
-                        curr_head = head_.load(mo::csm);
-                        if (prev_head == curr_head) {
-                            break; // empty
-                        }
+                    auto const new_deq_idx = node.deq_idx.load(mo::acq);
+                    auto const prev_head = curr_head;
+                    curr_head = head_.load(mo::csm);
+                    if (deq_idx == new_deq_idx && prev_head == curr_head) {
+                        break; // empty
                     }
                 }
                 continue;
