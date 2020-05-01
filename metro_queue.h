@@ -251,20 +251,20 @@ private:
 public:
     template <typename U, typename = std::enable_if_t<is_valid_push_value<U>>>
     bool try_push(U&& v) noexcept {
-        if (single_producer) {
-            return try_push_sp(v);
+        if constexpr (!single_producer) {
+            return try_push_mp(TmpIterator<U>{v}, 1);
         }
 
-        return try_push_mp(TmpIterator<U>{v}, 1);
+        return try_push_sp(v);
     }
 
     template <typename U, typename = std::enable_if_t<is_valid_pop_value<U>>>
     bool try_pop(U&& v) noexcept {
-        if (single_consumer) {
-            return try_pop_sc(v);
+        if constexpr (!single_consumer) {
+            return try_pop_mc(TmpIterator<U>{v}, 1, TmpNodeRef<node_ref_ok>{this});
         }
 
-        return try_pop_mc(TmpIterator<U>{v}, 1, TmpNodeRef<node_ref_ok>{this});
+        return try_pop_sc(v);
     }
 
     template <typename U, typename = std::enable_if_t<node_ref_ok && is_valid_pop_value<U>>>
@@ -363,12 +363,16 @@ private:
             auto const slot_offset = curr_tail.addr * slots_per_node_;
             auto const enq_idx = node.enq_idx.load(mo::lax);
             if (enq_idx < slots_per_node_) {
-                // slot acquired, try pushing to slot
                 auto& slot = slots_[slot_offset + enq_idx];
-                auto const pushed = push_to_slot(v, slot, curr_tail, ref);
-                node.enq_idx.store(enq_idx + 1, single_consumer ? mo::rls : mo::lax);
-
-                if (pushed) {
+                if constexpr (!single_consumer) {
+                    // slot acquired, try pushing to slot
+                    node.enq_idx.store(enq_idx + 1, mo::lax);
+                    if (push_to_slot(v, slot, curr_tail, ref)) {
+                        break;
+                    }
+                } else {
+                    slot.item = std::forward<U>(v);
+                    node.enq_idx.store(enq_idx + 1, mo::rls);
                     break;
                 }
             } else if (!get_next_tail(curr_tail)) {
@@ -437,12 +441,15 @@ private:
             auto const deq_idx = node.deq_idx.load(mo::lax);
             auto const enq_idx = node.enq_idx.load(single_producer ? mo::acq : mo::lax);
             if (deq_idx < enq_idx && deq_idx < slots_per_node_) {
-                // slot acquired, try pushing to slot
-                auto& slot = slots_[slot_offset + deq_idx];
-                auto const popped = pop_from_slot(v, slot, curr_head, ref);
                 node.deq_idx.store(deq_idx + 1, mo::lax);
-
-                if (popped) {
+                auto& slot = slots_[slot_offset + deq_idx];
+                if constexpr (!single_producer) {
+                    // slot acquired, try popping from slot
+                    if (pop_from_slot(v, slot, curr_head, ref)) {
+                        break;
+                    }
+                } else {
+                    pop_item(v, slot.item);
                     break;
                 }
             } else if (deq_idx < slots_per_node_ || !get_next_head(curr_head)) { 
@@ -541,19 +548,15 @@ private:
     template <typename U, bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>&) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if constexpr (!single_producer) {
-            if (s != ptr.state) {
-                // producer ABA occurred, invalidate slot
-                slot.state.store(invalid_producer(s), mo::rls);
-                return false;
-            }
+        if (s != ptr.state) {
+            // producer ABA occurred, invalidate slot
+            slot.state.store(invalid_producer(s), mo::rls);
+            return false;
         }
 
         // everything looks good, push item
         slot.item = std::forward<U>(v);
-        if constexpr (!single_producer) {
-            slot.state.store(pushed(s), mo::rls);
-        }
+        slot.state.store(pushed(s), mo::rls);
         return true;
     }
 
@@ -594,39 +597,35 @@ private:
     bool pop_from_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRefType&& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if constexpr (!single_producer || !single_consumer) {
-            if (!single_consumer && s != ptr.state) {
-                // consumer ABA occurred, attempt to invalidate slot
-                auto const new_state = invalid_consumer(s);
-                if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
-                    return false; // slot invalidated
-                }
-            } else {
-                // everything looks good, wait for producer
-                while ((curr_state = slot.state.load(mo::acq)) == open(s))
-                    ;
+        if (!single_consumer && s != ptr.state) {
+            // consumer ABA occurred, attempt to invalidate slot
+            auto const new_state = invalid_consumer(s);
+            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+                return false; // slot invalidated
             }
+        } else {
+            // everything looks good, wait for producer
+            while ((curr_state = slot.state.load(mo::acq)) == open(s))
+                ;
         }
 
         if (node_ref_ok) {
             ++ref.cnt; // consumer owns slot, increment reference count
         }
 
-        if constexpr (!single_producer) {
-            if (curr_state == invalid_producer(s)) {
-                // producer ABA occurred, close slot
-                slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
-                return false;
-            }
+        if (!single_producer && curr_state == invalid_producer(s)) {
+            // producer ABA occurred, close slot
+            slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
+            return false;
         }
 
         // success! pop item and close slot if needed
-        assert((single_producer && single_consumer) || curr_state == pushed(s));
+        assert(curr_state == pushed(s));
         pop_item(v, slot.item);
-        if constexpr (!single_consumer && !node_ref_ok) {
+        if (!single_consumer && !node_ref_ok) {
             slot.state.store(closed(s), mo::rls);
         } else {
-            assert((single_producer && single_consumer) || curr_state == closed(s));
+            assert(curr_state == closed(s));
         }
         return true;
     }

@@ -64,12 +64,29 @@ int main() {
     metro::SPMCRefQueuePtr<int> spmc_nr = metro::SPMCRefQueuePtr<int>(capacity, node_sz);
     metro::MPMCRefQueuePtr<int> mpmc_nr = metro::MPMCRefQueuePtr<int>(capacity, node_sz);
 
+    std::cout << "Running SPSC test..." << std::endl;
     test_single_thread(spsc, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
+
+    std::cout << "Running SPMC test..." << std::endl;
     test_single_thread(spmc, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
+
+    std::cout << "Running MPSC test..." << std::endl;
     test_single_thread(mpsc, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
+
+    std::cout << "Running MPMC test..." << std::endl;
     test_single_thread(mpmc, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
+
+    std::cout << "Running SPMC (w NodeRef) test..." << std::endl;
     test_single_thread(spmc_nr, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
+
+    std::cout << "Running MPMC (w NodeRef) test..." << std::endl;
     test_single_thread(mpmc_nr, capacity, node_sz);
+    std::cout << "PASSED!" << std::endl;
 
     return 0;
 }
