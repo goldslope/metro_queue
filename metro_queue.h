@@ -154,9 +154,11 @@ private:
     };
 
     struct TaggedPtr;
-    struct Slot;
     struct Node;
+    struct StatelessSlot;
+    struct StatefulSlot;
 
+    using Slot = std::conditional_t<single_producer && single_consumer, StatelessSlot, StatefulSlot>;
     using NodeAlloc = typename std::allocator_traits<Alloc>::template rebind_alloc<Node>;
     using SlotAlloc = typename std::allocator_traits<Alloc>::template rebind_alloc<Slot>;
 
@@ -539,15 +541,17 @@ private:
     template <typename U, bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>&) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if (!single_producer && s != ptr.state) {
-            // producer ABA occurred, invalidate slot
-            slot.state.store(invalid_producer(s), mo::rls);
-            return false;
+        if constexpr (!single_producer) {
+            if (s != ptr.state) {
+                // producer ABA occurred, invalidate slot
+                slot.state.store(invalid_producer(s), mo::rls);
+                return false;
+            }
         }
 
         // everything looks good, push item
         slot.item = std::forward<U>(v);
-        if (!single_producer) {
+        if constexpr (!single_producer) {
             slot.state.store(pushed(s), mo::rls);
         }
         return true;
@@ -590,32 +594,36 @@ private:
     bool pop_from_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRefType&& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if (!single_consumer && s != ptr.state) {
-            // consumer ABA occurred, attempt to invalidate slot
-            auto const new_state = invalid_consumer(s);
-            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
-                return false; // slot invalidated
+        if constexpr (!single_producer || !single_consumer) {
+            if (!single_consumer && s != ptr.state) {
+                // consumer ABA occurred, attempt to invalidate slot
+                auto const new_state = invalid_consumer(s);
+                if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+                    return false; // slot invalidated
+                }
+            } else {
+                // everything looks good, wait for producer
+                while ((curr_state = slot.state.load(mo::acq)) == open(s))
+                    ;
             }
-        } else if (!single_producer || !single_consumer) {
-            // everything looks good, wait for producer
-            while ((curr_state = slot.state.load(mo::acq)) == open(s))
-                ;
         }
 
         if (node_ref_ok) {
             ++ref.cnt; // consumer owns slot, increment reference count
         }
 
-        if (!single_producer && curr_state == invalid_producer(s)) {
-            // producer ABA occurred, close slot
-            slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
-            return false;
+        if constexpr (!single_producer) {
+            if (curr_state == invalid_producer(s)) {
+                // producer ABA occurred, close slot
+                slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
+                return false;
+            }
         }
 
         // success! pop item and close slot if needed
         assert((single_producer && single_consumer) || curr_state == pushed(s));
         pop_item(v, slot.item);
-        if (!single_consumer && !node_ref_ok) {
+        if constexpr (!single_consumer && !node_ref_ok) {
             slot.state.store(closed(s), mo::rls);
         } else {
             assert((single_producer && single_consumer) || curr_state == closed(s));
@@ -775,9 +783,13 @@ private:
         bool operator!=(TaggedPtr const& other) const noexcept {return addr != other.addr || state != other.state;}
     };
 
-    struct alignas(interference_size) Slot {
+    struct alignas(interference_size) StatelessSlot {
         T item;
+    };
+
+    struct alignas(interference_size) StatefulSlot {
         std::atomic<state_t> state = {0};
+        T item;
     };
 
     struct Node {
