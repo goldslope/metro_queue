@@ -197,8 +197,8 @@ public:
         }
 
         // setup free-list
-        for (size_t i = 1; i < num_nodes_; ++i) {
-            nodes_[i].free_next = i - 1;
+        for (address_t i = 1; i < num_nodes_; ++i) {
+            nodes_[i].next = {i - 1, 0};
         }
         free_list_.head = {static_cast<address_t>(num_nodes_ - 1), 0};
 
@@ -678,11 +678,10 @@ private:
         }
 
         // no more nodes in the queue, attempt to allocate
-        bool tail_appended = false;
-        auto const alloc_addr = free_list_.try_alloc(nodes_, curr_tail, tail_appended);
-        if (tail_appended) {
-            advance_ptr(tail_, curr_tail);
-            return true;
+        auto const prev_tail = curr_tail;
+        auto const alloc_addr = free_list_.try_alloc_or_advance_tail(nodes_, this, curr_tail);
+        if (prev_tail != curr_tail) {
+            return true; // tail was advanced already, no allocation needed
         } else if (alloc_addr == null_addr) {
             return false; // free-list is empty
         }
@@ -777,7 +776,7 @@ private:
     struct TaggedPtr {
         address_t addr;
         state_t state;
-    
+
         bool operator==(TaggedPtr const& other) const noexcept {return addr == other.addr && state == other.state;}
         bool operator!=(TaggedPtr const& other) const noexcept {return addr != other.addr || state != other.state;}
     };
@@ -807,45 +806,41 @@ private:
         }
 
         alignas(interference_size) std::atomic<TaggedPtr> next;
-        alignas(interference_size) std::atomic<address_t> free_next = {null_addr};
-        state_t state = 0;
         alignas(interference_size) std::atomic<size_t> enq_idx = {0};
         alignas(interference_size) std::atomic<size_t> deq_idx = {0};
         alignas(interference_size) std::atomic<size_t> ref_cnt;
+        alignas(interference_size) state_t state = 0;
     };
 
     struct FreeList {
         void dealloc(Node* nodes, address_t const addr) noexcept {
+            // close state of node and make it new list head
+            auto& node = nodes[addr];
+            node.state = closed(node.state);
+            TaggedPtr new_head = {addr, node.state};
+
+            // append new head to list
             auto curr_head = head.load(mo::lax);
-            TaggedPtr new_head = {addr};
             do {
-                new_head.state = curr_head.state;
-                nodes[addr].state = closed(nodes[addr].state);
-                nodes[addr].free_next.store(curr_head.addr, mo::lax);
+                node.next.store(curr_head, mo::lax);
             } while (!head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::lax));
         }
 
         address_t try_alloc(Node* nodes) noexcept {
-            bool unused;
-            return try_alloc<false>(nodes, {null_addr, 0}, unused);
+            TaggedPtr unused = {null_addr, 0};
+            return try_alloc_or_advance_tail<false>(nodes, nullptr, unused);
         }
 
-        template <bool q_tail_check=true>
-        address_t try_alloc(Node* nodes, TaggedPtr const q_tail, bool& q_tail_appended) noexcept {
-            auto const& q_tail_node = nodes[q_tail.addr];
+        template <bool advance_tail=true>
+        address_t try_alloc_or_advance_tail(Node* nodes, Queue* q, TaggedPtr& curr_tail) noexcept {
+            // remove current head if not empty
             auto curr_head = head.load(mo::acq);
-            TaggedPtr const null_ptr = {null_addr, q_tail.state};
-            TaggedPtr new_head;
- 
-            // check for empty list on each loop iteration
             while (curr_head.addr != null_addr) {
-                new_head.addr = nodes[curr_head.addr].free_next.load(mo::lax);
-                new_head.state = curr_head.state + 1;
-                if (head.compare_exchange_weak(curr_head, new_head, mo::rls, mo::acq)) {
+                TaggedPtr new_head = nodes[curr_head.addr].next.load(mo::lax);
+                if (head.compare_exchange_weak(curr_head, new_head, mo::lax, mo::acq)) {
                     break; // success!
-                } else if (q_tail_check && q_tail_node.next.load(mo::lax) != null_ptr) {
-                    q_tail_appended = true; // another producer already appended to queue tail
-                    break;
+                } else if (advance_tail && q->advance_ptr(q->tail_, curr_tail)) {
+                    return null_addr; // pointer advanced, no need for allocation
                 }
             }
             return curr_head.addr;
