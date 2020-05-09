@@ -22,7 +22,7 @@ void test_single_thread(QueuePtr& q, size_t capacity, size_t node_sz) {
             assert(q->try_push(i));
         }
 
-        // pop fail test
+        // push fail test
         for (int i = 0; i < capacity; ++i) {
             assert(!q->try_push(i));
         }
