@@ -833,15 +833,25 @@ private:
 
         template <bool advance_tail=true>
         address_t try_alloc_or_advance_tail(Node* nodes, Queue* q, TaggedPtr& curr_tail) noexcept {
-            // remove current head if not empty
+            // tail check logic
+            TaggedPtr const null_ptr = {null_addr, curr_tail.state};
+
+            // try to allocate a node or advance the tail
             auto curr_head = head.load(mo::acq);
             while (curr_head.addr != null_addr) {
                 TaggedPtr new_head = nodes[curr_head.addr].next.load(mo::lax);
                 if (head.compare_exchange_weak(curr_head, new_head, mo::lax, mo::acq)) {
                     break; // success!
-                } else if (advance_tail && q->advance_ptr(q->tail_, curr_tail)) {
-                    return null_addr; // pointer advanced, no need for allocation
+                } else if (advance_tail && nodes[curr_tail.addr].next.load(mo::lax) != null_ptr) {
+                    if (q->advance_ptr(q->tail_, curr_tail)) {
+                        return null_addr; // pointer advanced, no need for allocation
+                    }
                 }
+            }
+
+            // allocation failed, try again to advance the tail
+            if (curr_head.addr == null_addr) {
+                q->advance_ptr(q->tail_, curr_tail);
             }
             return curr_head.addr;
         }
