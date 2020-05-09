@@ -774,7 +774,7 @@ private:
         return node_ref_ok ? slots_per_node_ + num_ptrs : num_ptrs;
     }
 
-    struct TaggedPtr {
+    struct alignas(sizeof(address_t) + sizeof(state_t)) TaggedPtr {
         address_t addr;
         state_t state;
 
@@ -851,7 +851,7 @@ private:
             }
 
             // allocation failed, try again to advance the tail
-            if (curr_head.addr == null_addr) {
+            if (advance_tail && curr_head.addr == null_addr) {
                 q->advance_ptr(q->tail_, curr_tail);
             }
             return curr_head.addr;
