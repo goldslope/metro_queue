@@ -774,13 +774,20 @@ private:
         return node_ref_ok ? slots_per_node_ + num_ptrs : num_ptrs;
     }
 
-    struct alignas(sizeof(address_t) + sizeof(state_t)) TaggedPtr {
+    struct alignas(uintptr_t) TaggedPtr {
         address_t addr;
         state_t state;
 
-        bool operator==(TaggedPtr const& other) const noexcept {return addr == other.addr && state == other.state;}
-        bool operator!=(TaggedPtr const& other) const noexcept {return addr != other.addr || state != other.state;}
+        bool operator==(TaggedPtr const& other) const noexcept {
+            return addr == other.addr && state == other.state;
+        }
+
+        bool operator!=(TaggedPtr const& other) const noexcept {
+            return addr != other.addr || state != other.state;
+        }
     };
+    static_assert(sizeof(TaggedPtr) == alignof(TaggedPtr));
+    static_assert(sizeof(TaggedPtr) == sizeof(address_t) + sizeof(state_t));
 
     struct alignas(interference_size) StatelessSlot {
         T item;
