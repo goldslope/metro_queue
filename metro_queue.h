@@ -204,6 +204,7 @@ public:
 
         // setup queue
         auto const init_addr = free_list_.try_alloc(nodes_);
+        nodes_[init_addr].reset(refs_per_node());
         head_ = {init_addr, 0};
         tail_ = {init_addr, 0};
         back_ = {init_addr, 0};
@@ -849,7 +850,7 @@ private:
             while (curr_head.addr != null_addr) {
                 TaggedPtr new_head = nodes[curr_head.addr].next.load(mo::lax);
                 if (head.compare_exchange_weak(curr_head, new_head, mo::lax, mo::acq)) {
-                    break; // success!
+                    return curr_head.addr; // success!
                 } else if (advance_tail && nodes[curr_tail.addr].next.load(mo::lax) != null_ptr) {
                     if (q->advance_ptr(q->tail_, curr_tail)) {
                         return null_addr; // pointer advanced, no need for allocation
@@ -858,10 +859,10 @@ private:
             }
 
             // allocation failed, try again to advance the tail
-            if (advance_tail && curr_head.addr == null_addr) {
+            if (advance_tail) {
                 q->advance_ptr(q->tail_, curr_tail);
             }
-            return curr_head.addr;
+            return null_addr;
         }
 
         std::atomic<TaggedPtr> head;
