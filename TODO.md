@@ -2,7 +2,10 @@
 
 ## Functionality
 * portable memory pool to share between queues
+  * move reset() functionality into FreeList
+  * reset refcount before dealloc, maybe with new function `dealloc_reset()`
 * remap indices instead of using cache line padding on Slots
+  * `slot_alignment = round_up -> slot_size -> next_factor_of(interference_size)`
   * `mult = round_divide(interference_size, sizeof(Slot))`
   * `mult = round_up_power_of_2(mult)`
   * `slots_per_node = round_up_power_of_2(slots_per_node)`
