@@ -111,6 +111,13 @@ public:
             }
         }
 
+        void update(address_t new_addr) noexcept {
+            if (addr != new_addr) {
+                release();
+                addr = new_addr;
+            }
+        }
+
         // disable copy and move constructor
         NodeRef(NodeRef const&) = delete;
 
@@ -139,6 +146,13 @@ private:
             if (enabled && cnt > 0 && addr != null_addr) {
                 q_ptr->remove_node_reference<mo::rls>(addr, cnt);
                 cnt = 0;
+            }
+        }
+
+        void update(address_t new_addr) noexcept {
+            if (enabled && addr != new_addr) {
+                release();
+                addr = new_addr;
             }
         }
 
@@ -375,10 +389,7 @@ private:
                 return false; // full
             }
 
-            if (node_ref_ok && ref.addr != curr_tail.addr) {
-                ref.release();
-                ref.addr = curr_tail.addr;
-            }
+            ref.update(curr_tail.addr);
         }
 
         return true;
@@ -409,6 +420,7 @@ private:
                 } else {
                     // unsuccessful pushes, possibly due to ABA, reload and try again
                     curr_tail = tail_.load(mo::csm);
+                    ref.update(curr_tail.addr);
                     continue;
                 }
             }
@@ -417,10 +429,7 @@ private:
                 break; // full
             }
 
-            if (node_ref_ok && ref.addr != curr_tail.addr) {
-                ref.release();
-                ref.addr = curr_tail.addr;
-            }
+            ref.update(curr_tail.addr);
         }
 
         return push_cnt;
@@ -463,10 +472,7 @@ private:
 
         for (;;) {
             begin_loop:
-            if (node_ref_ok && ref.addr != curr_head.addr) {
-                ref.release();
-                ref.addr = curr_head.addr;
-            }
+            ref.update(curr_head.addr);
 
             auto& node = nodes_[curr_head.addr];
             auto const slot_offset = curr_head.addr * slots_per_node_;
