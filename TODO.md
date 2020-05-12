@@ -1,6 +1,9 @@
 # TODO
 
 ## Functionality
+* constructor changes
+  * two args: `num_nodes`, `slots_per_node`
+  * one arg: `queue_size` -> `slots_per_node * slots_per_node >= queue_size`
 * portable memory pool to share between queues
   * move reset() functionality into FreeList
   * reset refcount before dealloc, maybe with new function `dealloc_reset()`
