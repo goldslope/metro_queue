@@ -6,10 +6,6 @@
 #include <new>
 #include <type_traits>
 
-#ifndef METRO_QUEUE_RELAXED_NODE_LOAD
-    #define METRO_QUEUE_RELAXED_NODE_LOAD false
-#endif
-
 
 namespace metro {
 
@@ -90,9 +86,16 @@ template <typename T,
           typename>
 class Queue {
 
-    typedef uint32_t address_t;
-    typedef uint32_t state_t;
+    struct mo {
+        static constexpr auto lax = std::memory_order_relaxed;
+        static constexpr auto csm = std::memory_order_acquire; // consume = acquire, for now
+        static constexpr auto acq = std::memory_order_acquire;
+        static constexpr auto rls = std::memory_order_release;
+    };
 
+    using address_t = uint32_t;
+    using state_t = uint32_t;
+    using mo_t = std::memory_order;
     using QueuePtrType = QueuePtr<T, Alloc, single_producer, single_consumer, node_ref_ok>;
 
 public:
@@ -103,7 +106,7 @@ public:
 
         void release() noexcept {
             if (cnt > 0 && addr != null_addr) {
-                q_ptr->remove_node_reference(addr, cnt);
+                q_ptr->remove_node_reference<mo::rls>(addr, cnt);
                 cnt = 0;
             }
         }
@@ -134,7 +137,7 @@ private:
 
         void release() noexcept {
             if (enabled && cnt > 0 && addr != null_addr) {
-                q_ptr->remove_node_reference(addr, cnt);
+                q_ptr->remove_node_reference<mo::rls>(addr, cnt);
                 cnt = 0;
             }
         }
@@ -315,14 +318,6 @@ public:
     }
 
 private:
-    struct mo {
-        static constexpr auto lax = std::memory_order_relaxed;
-        static constexpr auto csm = std::memory_order_acquire; // consume = acquire, for now
-        static constexpr auto acq = std::memory_order_acquire;
-        static constexpr auto rls = std::memory_order_release;
-        static constexpr auto acq_rls = std::memory_order_acq_rel;
-    };
-
 #ifdef __cpp_lib_hardware_interference_size
     static constexpr auto interference_size = std::hardware_destructive_interference_size;
 #else
@@ -392,7 +387,7 @@ private:
     template <typename Iter>
     size_t try_push_mp(Iter it, size_t const item_cnt) noexcept {
         size_t push_cnt = 0;
-        auto curr_tail = tail_.load(METRO_QUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
+        auto curr_tail = tail_.load(mo::csm);
         TmpNodeRef<node_ref_ok> ref = {this, curr_tail.addr};
 
         for (;;) {
@@ -464,7 +459,7 @@ private:
     template <typename Iter, typename NodeRefType>
     bool try_pop_mc(Iter it, size_t const item_cnt, NodeRefType&& ref) noexcept {
         size_t pop_cnt = 0;
-        auto curr_head = head_.load(METRO_QUEUE_RELAXED_NODE_LOAD ? mo::lax : mo::csm);
+        auto curr_head = head_.load(mo::csm);
 
         for (;;) {
             begin_loop:
@@ -480,7 +475,7 @@ private:
             enq_idx = node.enq_idx.load(mo::lax);
             while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
                 auto const new_idx = deq_idx + std::min(item_cnt, enq_idx - deq_idx);
-                if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq_rls, mo::lax)) {
+                if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
                         // slot acquired, try popping from slot
                         auto& slot = slots_[slot_offset + deq_idx];
@@ -518,7 +513,7 @@ private:
             }
 
             // producers have filled the block, attempt dequeue optimistically
-            deq_idx = node.deq_idx.fetch_add(item_cnt, mo::acq_rls);
+            deq_idx = node.deq_idx.fetch_add(item_cnt, mo::acq);
             if (deq_idx < slots_per_node_) {
                 auto slot_cnt = item_cnt;
                 do {
@@ -552,7 +547,7 @@ private:
         auto const s = nodes_[ptr.addr].state;
         if (s != ptr.state) {
             // producer ABA occurred, invalidate slot
-            slot.state.store(invalid_producer(s), mo::rls);
+            slot.state.store(invalid_producer(s), mo::lax);
             return false;
         }
 
@@ -569,14 +564,14 @@ private:
         if (!single_producer && s != ptr.state) {
             // producer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_producer(s);
-            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::lax, mo::lax)) {
                 return false; // slot invalidated
             }
         } else {
             // everything looks good, attempt to push item
             slot.item = std::forward<U>(v);
             auto const new_state = pushed(s);
-            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::lax)) {
                 return true; // success!
             }
 
@@ -602,7 +597,7 @@ private:
         if (!single_consumer && s != ptr.state) {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
-            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::acq)) {
+            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::lax, mo::acq)) {
                 return false; // slot invalidated
             }
         } else {
@@ -617,7 +612,7 @@ private:
 
         if (!single_producer && curr_state == invalid_producer(s)) {
             // producer ABA occurred, close slot
-            slot.state.store(closed(s), single_consumer || node_ref_ok ? mo::lax : mo::rls);
+            slot.state.store(closed(s), mo::lax);
             return false;
         }
 
@@ -632,12 +627,13 @@ private:
         return true;
     }
 
+    template <mo_t mem_ord = mo::lax>
     bool advance_ptr(std::atomic<TaggedPtr>& ptr, TaggedPtr& curr_val) noexcept {
         auto const new_val = nodes_[curr_val.addr].next.load(mo::csm);
         TaggedPtr const null_ptr = {null_addr, curr_val.state};
         if (new_val != null_ptr) {
-            if (ptr.compare_exchange_strong(curr_val, new_val, mo::rls, mo::csm)) {
-                remove_node_reference(curr_val.addr);
+            if (ptr.compare_exchange_weak(curr_val, new_val, mo::rls, mo::csm)) {
+                remove_node_reference<mem_ord>(curr_val.addr);
                 curr_val = new_val;
             }
             return true;
@@ -663,8 +659,7 @@ private:
 
         // append new node to end of the queue
         TaggedPtr alloc_ptr = {alloc_addr, alloc_node.state};
-        auto& next_ptr = nodes_[curr_tail.addr].next;
-        next_ptr.store(alloc_ptr, mo::rls);
+        nodes_[curr_tail.addr].next.store(alloc_ptr, mo::rls);
 
         // now that new node is added, advance the tail
         curr_tail = alloc_ptr;
@@ -698,7 +693,7 @@ private:
         auto done = false;
         do {
             auto& next_ptr = nodes_[curr_back.addr].next;
-            auto curr_next = next_ptr.load(mo::csm); 
+            auto curr_next = next_ptr.load(mo::csm);
             TaggedPtr const null_ptr = {null_addr, curr_back.state};
             if (curr_next == null_ptr) {
                 if (next_ptr.compare_exchange_strong(curr_next, alloc_ptr, mo::rls, mo::csm)) {
@@ -706,7 +701,7 @@ private:
                     done = true;
                 }
             }
-            if (back_.compare_exchange_strong(curr_back, curr_next, mo::rls, mo::csm)) {
+            if (back_.compare_exchange_weak(curr_back, curr_next, mo::rls, mo::csm)) {
                 remove_node_reference(curr_back.addr);
             }
         } while(!done);
@@ -728,29 +723,29 @@ private:
         auto last_head = curr_head;
         curr_head = curr_next;
         head_.store(curr_head, mo::lax);
-        remove_node_reference(last_head.addr);
+        remove_node_reference<mo::rls>(last_head.addr);
         return true;
     }
 
     template <bool sc = single_consumer, std::enable_if_t<!sc, int> = 0>
     bool get_next_head(TaggedPtr& curr_head) noexcept {
-        return advance_ptr(head_, curr_head);
+        return advance_ptr<mo::rls>(head_, curr_head);
     }
 
-    template <bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
+    template <mo_t mem_ord = mo::lax, bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
     void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
         auto& node = nodes_[addr];
-        if (single_producer || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt,  mo::acq_rls)) {
+        if (single_producer || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, mem_ord)) {
+            std::atomic_thread_fence(single_producer || mem_ord == mo::rls ? mo::lax : mo::acq);
             free_list_.dealloc(nodes_, addr);
         }
     }
 
-    template <bool sc = single_consumer, std::enable_if_t<!sc, int> = 0>
+    template <mo_t mem_ord = mo::lax, bool sc = single_consumer, std::enable_if_t<!sc, int> = 0>
     void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
         auto& node = nodes_[addr];
         auto const zero_ref_cnt = single_producer && !node_ref_ok;
-        auto const sub_memory_order = node_ref_ok ? mo::acq_rls : mo::lax;
-        if (zero_ref_cnt || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, sub_memory_order)) {
+        if (zero_ref_cnt || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, mem_ord)) {
             if (!node_ref_ok) {
                 // wait for all slots to be closed
                 auto const slot_offset = addr * slots_per_node_;
@@ -762,9 +757,9 @@ private:
                         closed_cnt += slot.state.load(mo::lax) == closed(node.state);
                     }
                 } while (closed_cnt < slots_per_node_);
-                std::atomic_thread_fence(mo::acq); // synchronize with all releases
             }
 
+            std::atomic_thread_fence(mo::acq); // synchronize with all releases
             free_list_.dealloc(nodes_, addr);
         }
     }
@@ -808,9 +803,9 @@ private:
         }
 
         void reset() noexcept {
-            std::atomic_thread_fence(mo::rls);
-            enq_idx.store(0, mo::lax);
-            deq_idx.store(0, mo::lax);
+            std::atomic_thread_fence(single_producer && !single_consumer ? mo::rls : mo::lax);
+            enq_idx.store(0, single_producer ? mo::lax : mo::rls);
+            deq_idx.store(0, single_consumer ? mo::lax : mo::rls);
             next.store({null_addr, state}, mo::lax);
         }
 
@@ -840,28 +835,28 @@ private:
             return try_alloc_or_advance_tail<false>(nodes, nullptr, unused);
         }
 
-        template <bool advance_tail=true>
+        template <bool advance_tail = true>
         address_t try_alloc_or_advance_tail(Node* nodes, Queue* q, TaggedPtr& curr_tail) noexcept {
-            // tail check logic
-            TaggedPtr const null_ptr = {null_addr, curr_tail.state};
+            auto curr_head = head.load(mo::acq);
+
+            // check if list is empty
+            if (curr_head.addr == null_addr) {
+                if (advance_tail) {
+                    q->advance_ptr(q->tail_, curr_tail);
+                }
+                return null_addr;
+            }
 
             // try to allocate a node or advance the tail
-            auto curr_head = head.load(mo::acq);
-            while (curr_head.addr != null_addr) {
+            do {
                 TaggedPtr new_head = nodes[curr_head.addr].next.load(mo::lax);
                 if (head.compare_exchange_weak(curr_head, new_head, mo::lax, mo::acq)) {
                     return curr_head.addr; // success!
-                } else if (advance_tail && nodes[curr_tail.addr].next.load(mo::lax) != null_ptr) {
-                    if (q->advance_ptr(q->tail_, curr_tail)) {
-                        return null_addr; // pointer advanced, no need for allocation
-                    }
+                } else if (advance_tail && q->advance_ptr(q->tail_, curr_tail)) {
+                    return null_addr; // pointer advanced, no need for allocation
                 }
-            }
+            } while (curr_head.addr != null_addr);
 
-            // allocation failed, try again to advance the tail
-            if (advance_tail) {
-                q->advance_ptr(q->tail_, curr_tail);
-            }
             return null_addr;
         }
 
