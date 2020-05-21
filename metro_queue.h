@@ -6,6 +6,18 @@
 #include <new>
 #include <type_traits>
 
+#if !__has_cpp_attribute(likely)
+    #ifdef likely
+        #error "'likely' already defined; reorder this header prior to 'likely' definition"
+    #endif
+    #define likely
+#endif
+#if !__has_cpp_attribute(unlikely)
+    #ifdef unlikely
+        #error "'unlikely' already defined; reorder this header prior to 'unlikely' definition"
+    #endif
+    #define unlikely
+#endif
 
 namespace metro {
 
@@ -111,8 +123,9 @@ public:
             }
         }
 
+    private:
         void update(address_t new_addr) noexcept {
-            if (addr != new_addr) {
+            if (addr != new_addr) [[unlikely]] {
                 release();
                 addr = new_addr;
             }
@@ -127,7 +140,6 @@ public:
         void operator delete(void*) = delete;
         void operator delete[](void*) = delete;
 
-    private:
         QueuePtrType const q_ptr; // const member -> non-assignable
         address_t addr;
         size_t cnt;
@@ -150,7 +162,7 @@ private:
         }
 
         void update(address_t new_addr) noexcept {
-            if (enabled && addr != new_addr) {
+            if (enabled && addr != new_addr) [[unlikely]] {
                 release();
                 addr = new_addr;
             }
@@ -287,7 +299,7 @@ public:
 
     template <typename U, typename = std::enable_if_t<node_ref_ok && is_valid_pop_value<U>>>
     bool try_pop(U&& v, NodeRef& ref) noexcept {
-        if (ref.q_ptr.get() != this) {
+        if (ref.q_ptr.get() != this) [[unlikely]] {
             return try_pop_mc(TmpIterator<U>{v}, 1, TmpNodeRef<node_ref_ok>{this});
         }
 
@@ -298,7 +310,7 @@ public:
                                                          is_valid_push_iterator<Iter>>>
     size_t try_push(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
-        if (item_cnt > 0) {
+        if (item_cnt > 0) [[likely]] {
             return try_push_mp(begin, item_cnt);
         }
 
@@ -309,7 +321,7 @@ public:
                                                          is_valid_pop_iterator<Iter>>>
     size_t try_pop(Iter begin, Iter end) noexcept {
         auto const item_cnt = end - begin;
-        if (item_cnt > 0) {
+        if (item_cnt > 0) [[likely]] {
             return try_pop_mc(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
         }
 
@@ -320,8 +332,8 @@ public:
                                                          is_valid_pop_iterator<Iter>>>
     size_t try_pop(Iter begin, Iter end, NodeRef& ref) noexcept {
         auto const item_cnt = end - begin;
-        if (item_cnt > 0) {
-            if (ref.q_ptr.get() != this) {
+        if (item_cnt > 0) [[likely]] {
+            if (ref.q_ptr.get() != this) [[unlikely]] {
                 return try_pop_mc(begin, item_cnt, TmpNodeRef<node_ref_ok>{this});
             }
 
@@ -372,12 +384,12 @@ private:
             auto& node = nodes_[curr_tail.addr];
             auto const slot_offset = curr_tail.addr * slots_per_node_;
             auto const enq_idx = node.enq_idx.load(mo::lax);
-            if (enq_idx < slots_per_node_) {
+            if (enq_idx < slots_per_node_) [[likely]] {
                 auto& slot = slots_[slot_offset + enq_idx];
                 if constexpr (!single_consumer) {
                     // slot acquired, try pushing to slot
                     node.enq_idx.store(enq_idx + 1, mo::lax);
-                    if (push_to_slot(v, slot, curr_tail, ref)) {
+                    if (push_to_slot(v, slot, curr_tail, ref)) [[likely]] {
                         break;
                     }
                 } else {
@@ -405,7 +417,7 @@ private:
             auto& node = nodes_[curr_tail.addr];
             auto const slot_offset = curr_tail.addr * slots_per_node_;
             auto enq_idx = node.enq_idx.fetch_add(item_cnt, mo::acq);
-            if (enq_idx < slots_per_node_) {
+            if (enq_idx < slots_per_node_) [[likely]] {
                 auto slot_cnt = item_cnt;
                 do {
                     // slot acquired, try pushing to slot
@@ -415,7 +427,7 @@ private:
                     push_cnt += pushed;
                 } while (--slot_cnt > 0 && ++enq_idx < slots_per_node_);
 
-                if (push_cnt > 0) {
+                if (push_cnt > 0) [[likely]] {
                     break;
                 } else {
                     // unsuccessful pushes, possibly due to ABA, reload and try again
@@ -445,12 +457,12 @@ private:
             auto const slot_offset = curr_head.addr * slots_per_node_;
             auto const deq_idx = node.deq_idx.load(mo::lax);
             auto const enq_idx = node.enq_idx.load(single_producer ? mo::acq : mo::lax);
-            if (deq_idx < enq_idx && deq_idx < slots_per_node_) {
+            if (deq_idx < enq_idx && deq_idx < slots_per_node_) [[likely]] {
                 node.deq_idx.store(deq_idx + 1, mo::lax);
                 auto& slot = slots_[slot_offset + deq_idx];
                 if constexpr (!single_producer) {
                     // slot acquired, try popping from slot
-                    if (pop_from_slot(v, slot, curr_head, ref)) {
+                    if (pop_from_slot(v, slot, curr_head, ref)) [[likely]] {
                         break;
                     }
                 } else {
@@ -479,7 +491,7 @@ private:
             size_t deq_idx, enq_idx;
             deq_idx = 0;
             enq_idx = node.enq_idx.load(mo::lax);
-            while (enq_idx < slots_per_node_ && deq_idx < enq_idx) {
+            while (enq_idx < slots_per_node_ && deq_idx < enq_idx) [[unlikely]] {
                 auto const new_idx = deq_idx + std::min(item_cnt, enq_idx - deq_idx);
                 if (node.deq_idx.compare_exchange_weak(deq_idx, new_idx, mo::acq, mo::lax)) {
                     do {
@@ -501,7 +513,7 @@ private:
                 enq_idx = node.enq_idx.load(mo::lax);
             }
 
-            if (deq_idx >= enq_idx) {
+            if (deq_idx >= enq_idx) [[unlikely]] {
                 deq_idx = node.deq_idx.load(mo::acq);
                 if (deq_idx >= slots_per_node_) {
                     if (!get_next_head(curr_head)) {
@@ -520,7 +532,7 @@ private:
 
             // producers have filled the block, attempt dequeue optimistically
             deq_idx = node.deq_idx.fetch_add(item_cnt, mo::acq);
-            if (deq_idx < slots_per_node_) {
+            if (deq_idx < slots_per_node_) [[likely]] {
                 auto slot_cnt = item_cnt;
                 do {
                     // slot acquired, try popping from slot
@@ -530,7 +542,7 @@ private:
                     pop_cnt += popped;
                 } while (--slot_cnt > 0 && ++deq_idx < slots_per_node_);
 
-                if (pop_cnt > 0) {
+                if (pop_cnt > 0) [[likely]] {
                     break;
                 } else {
                     // unsuccessful pops, possibly due to ABA, reload and try again
@@ -551,7 +563,7 @@ private:
     template <typename U, bool sc = single_consumer, std::enable_if_t<sc, int> = 0>
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>&) noexcept {
         auto const s = nodes_[ptr.addr].state;
-        if (s != ptr.state) {
+        if (s != ptr.state) [[unlikely]] {
             // producer ABA occurred, invalidate slot
             slot.state.store(invalid_producer(s), mo::lax);
             return false;
@@ -567,7 +579,7 @@ private:
     bool push_to_slot(U&& v, Slot& slot, TaggedPtr ptr, TmpNodeRef<node_ref_ok>& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if (!single_producer && s != ptr.state) {
+        if (!single_producer && s != ptr.state) [[unlikely]] {
             // producer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_producer(s);
             if (slot.state.compare_exchange_strong(curr_state, new_state, mo::lax, mo::lax)) {
@@ -577,7 +589,7 @@ private:
             // everything looks good, attempt to push item
             slot.item = std::forward<U>(v);
             auto const new_state = pushed(s);
-            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::lax)) {
+            if (slot.state.compare_exchange_strong(curr_state, new_state, mo::rls, mo::lax)) [[likely]] {
                 return true; // success!
             }
 
@@ -600,7 +612,7 @@ private:
     bool pop_from_slot(U&& v, Slot& slot, TaggedPtr ptr, NodeRefType&& ref) noexcept {
         auto const s = nodes_[ptr.addr].state;
         auto curr_state = open(s);
-        if (!single_consumer && s != ptr.state) {
+        if (!single_consumer && s != ptr.state) [[unlikely]] {
             // consumer ABA occurred, attempt to invalidate slot
             auto const new_state = invalid_consumer(s);
             if (slot.state.compare_exchange_strong(curr_state, new_state, mo::lax, mo::acq)) {
@@ -608,7 +620,7 @@ private:
             }
         } else {
             // everything looks good, wait for producer
-            while ((curr_state = slot.state.load(mo::acq)) == open(s))
+            while ((curr_state = slot.state.load(mo::acq)) == open(s)) [[unlikely]]
                 ;
         }
 
@@ -616,7 +628,7 @@ private:
             ++ref.cnt; // consumer owns slot, increment reference count
         }
 
-        if (!single_producer && curr_state == invalid_producer(s)) {
+        if (!single_producer && curr_state == invalid_producer(s)) [[unlikely]] {
             // producer ABA occurred, close slot
             slot.state.store(closed(s), mo::lax);
             return false;
@@ -638,7 +650,7 @@ private:
         auto const new_val = nodes_[curr_val.addr].next.load(mo::csm);
         TaggedPtr const null_ptr = {null_addr, curr_val.state};
         if (new_val != null_ptr) {
-            if (ptr.compare_exchange_weak(curr_val, new_val, mo::rls, mo::csm)) {
+            if (ptr.compare_exchange_strong(curr_val, new_val, mo::rls, mo::csm)) {
                 remove_node_reference<mem_ord>(curr_val.addr);
                 curr_val = new_val;
             }
@@ -751,7 +763,7 @@ private:
     void remove_node_reference(address_t const addr, int const rmv_cnt = 1) noexcept {
         auto& node = nodes_[addr];
         auto const zero_ref_cnt = single_producer && !node_ref_ok;
-        if (zero_ref_cnt || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, mem_ord)) {
+        if (zero_ref_cnt || rmv_cnt == node.ref_cnt.fetch_sub(rmv_cnt, mem_ord)) [[unlikely]] {
             if (!node_ref_ok) {
                 // wait for all slots to be closed
                 auto const slot_offset = addr * slots_per_node_;
@@ -885,3 +897,10 @@ private:
 };
 
 }
+
+#if !__has_cpp_attribute(likely)
+    #undef likely
+#endif
+#if !__has_cpp_attribute(unlikely)
+    #undef unlikely
+#endif
