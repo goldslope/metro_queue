@@ -155,14 +155,14 @@ private:
         ~TmpNodeRef() {release();}
 
         void release() noexcept {
-            if (enabled && cnt > 0 && addr != null_addr) {
+            if (enabled && cnt > 0) {
                 q_ptr->remove_node_reference<mo::rls>(addr, cnt);
                 cnt = 0;
             }
         }
 
         void update(address_t new_addr) noexcept {
-            if (enabled && addr != new_addr) [[unlikely]] {
+            if (enabled && addr != new_addr) {
                 release();
                 addr = new_addr;
             }
@@ -481,11 +481,14 @@ private:
     bool try_pop_mc(Iter it, size_t const item_cnt, NodeRefType&& ref) noexcept {
         size_t pop_cnt = 0;
         auto curr_head = head_.load(mo::csm);
+        if (std::is_same_v<NodeRefType, NodeRef>) {
+            ref.update(curr_head.addr);
+        } else {
+            ref.addr = curr_head.addr;
+        }
 
         for (;;) {
             begin_loop:
-            ref.update(curr_head.addr);
-
             auto& node = nodes_[curr_head.addr];
             auto const slot_offset = curr_head.addr * slots_per_node_;
             size_t deq_idx, enq_idx;
@@ -507,6 +510,7 @@ private:
                     } else {
                         // unsuccessful pops, possibly due to ABA, reload and try again
                         curr_head = head_.load(mo::csm);
+                        ref.update(curr_head.addr);
                         goto begin_loop;
                     }
                 }
@@ -527,6 +531,7 @@ private:
                         break; // empty
                     }
                 }
+                ref.update(curr_head.addr);
                 continue;
             }
 
@@ -547,6 +552,7 @@ private:
                 } else {
                     // unsuccessful pops, possibly due to ABA, reload and try again
                     curr_head = head_.load(mo::csm);
+                    ref.update(curr_head.addr);
                     continue;
                 }
             }
