@@ -28,7 +28,6 @@ must deallocated to a local free-list which is managed by the queue.
 * template specialized SPSC, SPMC, MPSC, MPMC queues
 * bulk push and pop operations
 * no thread registration
-* leak-free (queue is constructed via smartpointer)
 
 ## Fast-path Operations (MPMC -- roughly, for large node and small object)
 * single push: 1 contested fetch-add + 1 uncontested compare-exchange, node operations amortized 
